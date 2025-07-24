@@ -107,12 +107,12 @@ llmOpenrouter a = do
         llmOpenrouterReq = interpret $ \case
             AskLLM query -> restPost (Endpoint "https://openrouter.ai/api/v1/chat/completions") OpenrouterQuery {model="gqen/gwen3-coder:free", messages=[OpenrouterMessage "user" query]}
 
-openrouterSecretEnv :: Member (Embed IO) r => Sem (Secret OpenrouterKey :r) a -> Sem r a
-openrouterSecretEnv = interpret $ \case
-    GetSecret -> fmap OpenrouterKey $ embed $ getEnv "OPENROUTER_API"
+secretEnv :: Member (Embed IO) r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
+secretEnv gensecret envname = interpret $ \case
+    GetSecret -> fmap gensecret $ embed $ getEnv envname
 
 openrouter :: Members [Embed IO, Fail, HTTP, RestAPI] r => Sem (LLM : Secret OpenrouterKey : r) a -> Sem r a
-openrouter = openrouterSecretEnv . llmOpenrouter
+openrouter = secretEnv OpenrouterKey "OPENROUTER_API" . llmOpenrouter
 
 -- Reinterpreter for HTTP with header support
 withHeaders :: Member HTTP r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
