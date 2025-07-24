@@ -96,8 +96,8 @@ data OpenrouterQuery = OpenrouterQuery {model :: String, messages :: [Openrouter
 newtype OpenrouterKey = OpenrouterKey String
 
 
-llmOpenrouter :: Members [Fail, HTTP, RestAPI, Secret OpenrouterKey] r => Sem (LLM : r) a -> Sem r a
-llmOpenrouter a = do
+llmOpenrouter :: Members [Fail, HTTP, RestAPI, Secret OpenrouterKey] r => String -> Sem (LLM : r) a -> Sem r a
+llmOpenrouter model a = do
     OpenrouterKey key <- getSecret @OpenrouterKey
     withHeaders (settoken key) . llmOpenrouterReq $ a
     where
@@ -105,14 +105,14 @@ llmOpenrouter a = do
         settoken apikey r@HTTPRequest{headers} = r { headers = ("Authorization: Bearer " <> apikey) : headers }
         llmOpenrouterReq :: Members [Fail, RestAPI] r => Sem (LLM : r) a -> Sem r a
         llmOpenrouterReq = interpret $ \case
-            AskLLM query -> restPost (Endpoint "https://openrouter.ai/api/v1/chat/completions") OpenrouterQuery {model="gqen/gwen3-coder:free", messages=[OpenrouterMessage "user" query]}
+            AskLLM query -> restPost (Endpoint "https://openrouter.ai/api/v1/chat/completions") OpenrouterQuery {model=model, messages=[OpenrouterMessage "user" query]}
 
 secretEnv :: Member (Embed IO) r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
 secretEnv gensecret envname = interpret $ \case
     GetSecret -> fmap gensecret $ embed $ getEnv envname
 
 openrouter :: Members [Embed IO, Fail, HTTP, RestAPI] r => Sem (LLM : Secret OpenrouterKey : r) a -> Sem r a
-openrouter = secretEnv OpenrouterKey "OPENROUTER_API" . llmOpenrouter
+openrouter = secretEnv OpenrouterKey "OPENROUTER_API" . llmOpenrouter "deepseek/deepseek-chat-v3-0324:free"
 
 -- Reinterpreter for HTTP with header support
 withHeaders :: Member HTTP r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
