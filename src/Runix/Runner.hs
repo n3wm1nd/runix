@@ -26,6 +26,7 @@ import Data.Aeson (encode, decode, FromJSON)
 import Data.ByteString.Lazy (ByteString)
 import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
+import qualified Data.ByteString.Lazy as BL
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, RestAPI, CompileTask]
@@ -34,10 +35,10 @@ filesystemIO :: Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r
 filesystemIO = interpret $ \case
     ReadFile p -> do
         info $ "reading file: " ++ p
-        embed $ Prelude.readFile p
+        embed $ BL.readFile p
     WriteFile p d -> do
         info $ "writing file: " ++ p
-        embed $ Prelude.writeFile p d
+        embed $ BL.writeFile p d
 
 restapiIO :: Members [Embed IO, HTTP, Fail] r => Sem (RestAPI : r) a -> Sem r a
 restapiIO = interpret $ \case

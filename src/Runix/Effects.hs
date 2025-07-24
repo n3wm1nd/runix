@@ -24,8 +24,8 @@ import Data.ByteString.Lazy (ByteString)
 
 -- Effects
 data FileSystem (m :: Type -> Type) a where
-    ReadFile :: FilePath -> FileSystem m String
-    WriteFile :: FilePath -> String -> FileSystem m ()
+    ReadFile :: FilePath -> FileSystem m ByteString
+    WriteFile :: FilePath -> ByteString -> FileSystem m ()
 
 makeSem ''FileSystem
 
