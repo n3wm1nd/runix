@@ -135,7 +135,6 @@ compileTaskIO = interpret $ \case
         info $ "compiling haskell code: " <> T.pack project.name
         result <- embed $ Compiler.compile project
         case result of
-            -- FIXME show errors and warnings in info/warning log
             f@CompileFail {} -> do
                 warning "compilation failure"
                 info $ T.pack $ show f.compileWarnings
