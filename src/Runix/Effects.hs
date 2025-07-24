@@ -79,6 +79,11 @@ data RestAPI (m :: Type -> Type) a where
 
 makeSem ''RestAPI
 
+data LLM (m :: Type -> Type) a where
+    AskLLM :: Text -> LLM m Text
+makeSem ''LLM
+
+
 data Logging (m :: Type -> Type) a where
     Info :: Text -> Logging m ()
     Warning :: Text -> Logging m ()

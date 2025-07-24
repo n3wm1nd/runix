@@ -10,6 +10,9 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TypeApplications #-}
 
 
 module Runix.Runner (runUntrusted) where
@@ -23,12 +26,15 @@ import Polysemy.Error
 import Runix.Effects
 import qualified Runix.Compiler as Compiler
 import Data.Either (fromRight)
-import Data.Aeson (encode, decode, FromJSON)
+import Data.Aeson (encode, decode, FromJSON, ToJSON)
 import Data.ByteString.Lazy (ByteString)
 import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
+import GHC.Generics (Generic)
+import Distribution.TestSuite (TestInstance(run))
+import System.Environment (getEnv)
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, RestAPI, CompileTask]
@@ -74,7 +80,7 @@ httpIO = interpret $ \case
         let parsed = CMC.catch (parseRequest request.uri) Left
         req <- case parsed of
             Right r -> return r
-            Left e -> fail $ 
+            Left e -> fail $
                 "error parsing uri: " <> request.uri <> "\n" <> show e
         resp <- httpLBS req
         return $ HTTPResponse
@@ -83,9 +89,34 @@ httpIO = interpret $ \case
             , body = getResponseBody resp
             }
 
+data OpenrouterMessage = OpenrouterMessage {role :: String, content :: T.Text}
+    deriving (Generic, ToJSON)
+data OpenrouterQuery = OpenrouterQuery {model :: String, messages :: [OpenrouterMessage]}
+    deriving (Generic, ToJSON)
+newtype OpenrouterKey = OpenrouterKey String
+
+
+llmOpenrouter :: Members [Fail, HTTP, RestAPI, Secret OpenrouterKey] r => Sem (LLM : r) a -> Sem r a
+llmOpenrouter a = do
+    OpenrouterKey key <- getSecret @OpenrouterKey
+    withHeaders (settoken key) . llmOpenrouterReq $ a
+    where
+        settoken :: String -> HTTPRequest -> HTTPRequest
+        settoken apikey r@HTTPRequest{headers} = r { headers = ("Authorization: Bearer " <> apikey) : headers }
+        llmOpenrouterReq :: Members [Fail, RestAPI] r => Sem (LLM : r) a -> Sem r a
+        llmOpenrouterReq = interpret $ \case
+            AskLLM query -> restPost (Endpoint "https://openrouter.ai/api/v1/chat/completions") OpenrouterQuery {model="gqen/gwen3-coder:free", messages=[OpenrouterMessage "user" query]}
+
+openrouterSecretEnv :: Member (Embed IO) r => Sem (Secret OpenrouterKey :r) a -> Sem r a
+openrouterSecretEnv = interpret $ \case
+    GetSecret -> fmap OpenrouterKey $ embed $ getEnv "OPENROUTER_API"
+
+openrouter :: Members [Embed IO, Fail, HTTP, RestAPI] r => Sem (LLM : Secret OpenrouterKey : r) a -> Sem r a
+openrouter = openrouterSecretEnv . llmOpenrouter
+
 -- Reinterpreter for HTTP with header support
-withHeaders :: Member HTTP r => (HTTPRequest -> HTTPRequest) -> Sem (HTTP : r) a -> Sem (HTTP : r) a
-withHeaders modifyRequest = reinterpret $ \case
+withHeaders :: Member HTTP r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
+withHeaders modifyRequest = intercept $ \case
     HttpRequest request -> httpRequest (modifyRequest request)
 
 -- Example usage of withHeaders for setting authentication tokens:
@@ -128,7 +159,7 @@ failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
 failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
 runUntrusted :: (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. restapiIO. compileTaskIO
+runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. restapiIO. openrouter .  compileTaskIO
 
 x :: Member FileSystem r => Sem r ()
 x = do
