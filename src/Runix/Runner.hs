@@ -16,16 +16,21 @@
 
 
 module Runix.Runner (runUntrusted) where
+-- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
-import qualified Prelude
+import System.Environment (getEnv)
+import Data.Either (fromRight)
 
+-- Polysemy libraries
 import Polysemy
 import Polysemy.Fail
 import Polysemy.Error
 
+-- Local modules
 import Runix.Effects
 import qualified Runix.Compiler as Compiler
-import Data.Either (fromRight)
+
+-- External libraries
 import Data.Aeson (encode, decode, FromJSON, ToJSON)
 import Data.ByteString.Lazy (ByteString)
 import Network.HTTP.Simple
@@ -33,8 +38,6 @@ import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import GHC.Generics (Generic)
-import Distribution.TestSuite (TestInstance(run))
-import System.Environment (getEnv)
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, RestAPI, CompileTask]
