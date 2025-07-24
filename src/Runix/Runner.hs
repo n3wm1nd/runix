@@ -107,9 +107,13 @@ llmOpenrouter model a = do
         llmOpenrouterReq = interpret $ \case
             AskLLM query -> restPost (Endpoint "https://openrouter.ai/api/v1/chat/completions") OpenrouterQuery {model=model, messages=[OpenrouterMessage "user" query]}
 
-secretEnv :: Member (Embed IO) r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
+secretEnv :: Members [Fail, Embed IO] r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
 secretEnv gensecret envname = interpret $ \case
-    GetSecret -> fmap gensecret $ embed $ getEnv envname
+    GetSecret -> do
+        key <- embed $ getEnv envname
+        if key == "" 
+            then fail $ "ENV " <> envname <> " is unset" 
+            else pure $ gensecret key
 
 openrouter :: Members [Embed IO, Fail, HTTP, RestAPI] r => Sem (LLM : Secret OpenrouterKey : r) a -> Sem r a
 openrouter = secretEnv OpenrouterKey "OPENROUTER_API" . llmOpenrouter "deepseek/deepseek-chat-v3-0324:free"
