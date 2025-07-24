@@ -19,6 +19,7 @@ import Prelude hiding (readFile, writeFile)
 import System.FilePath
 import Data.List (isPrefixOf)
 import Data.Aeson
+import Data.ByteString.Lazy (ByteString)
 
 
 -- Effects
@@ -48,16 +49,15 @@ limitSubpath p = limitedAccess (\case
 
 data HTTPRequest = HTTPRequest {
     method :: String,
-    host :: String,
-    path :: String,
+    uri :: String,
     headers :: [String],
-    body :: Maybe String
+    body :: Maybe ByteString
 }
 
 data HTTPResponse = HTTPResponse {
     code :: Int,
     headers :: [String],
-    body :: String
+    body :: ByteString
 }
 
 data HTTP (m :: Type -> Type) a where
@@ -69,7 +69,13 @@ newtype RestData a = RestData a
 newtype RestResponse a = RestResponse a
 
 data RestAPI (m :: Type -> Type) a where
+    RestGet :: (FromJSON s) => Endpoint -> RestAPI m s
     RestPost :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI m s
+    RestPut :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI m s
+    RestDelete :: (FromJSON s) => Endpoint -> RestAPI m s
+    RestPatch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI m s
+    RestCustom :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI m s
+
 makeSem ''RestAPI
 
 data Logging (m :: Type -> Type) a where
@@ -108,7 +114,7 @@ data HaskellProject = HaskellProject
     description :: ProjectDescription,
     main :: HaskellModule,
     modules :: [HaskellModule],
-    other_modulse :: [HaskellModule],
+    other_modules :: [HaskellModule],
     dependencies :: [HaskellPackage]
   }
 

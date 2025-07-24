@@ -29,12 +29,19 @@
           buildInputs = [
             haskellPackages.haskell-language-server
             haskellPackages.polysemy
+            haskellPackages.http-conduit
+            haskellPackages.aeson
             pkgs.cabal-install
             pkgs.cabal2nix
           ];
+          shellHook = ''
+            export GHC_PACKAGE_PATH=$NIX_GHC_LIBDIR/package.conf.d
+          '';
           withHoogle = true;
           packages = p : with p; [
             polysemy
+            aeson
+            http-conduit
             ];
         };
       };

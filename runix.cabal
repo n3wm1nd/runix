@@ -68,7 +68,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base, polysemy >=1.9, bytestring, temporary, filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process
+    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, exceptions
 
     -- Directories containing source files.
     hs-source-dirs:   src
