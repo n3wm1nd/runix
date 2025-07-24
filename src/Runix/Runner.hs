@@ -9,6 +9,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 
 module Runix.Runner (runUntrusted) where
@@ -27,6 +28,7 @@ import Data.ByteString.Lazy (ByteString)
 import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Text as T
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, RestAPI, CompileTask]
@@ -34,10 +36,10 @@ type SafeEffects = [FileSystem, HTTP, RestAPI, CompileTask]
 filesystemIO :: Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
 filesystemIO = interpret $ \case
     ReadFile p -> do
-        info $ "reading file: " ++ p
+        info $ "reading file: " <> T.pack p
         embed $ BL.readFile p
     WriteFile p d -> do
-        info $ "writing file: " ++ p
+        info $ "writing file: " <> T.pack p
         embed $ BL.writeFile p d
 
 restapiIO :: Members [Embed IO, HTTP, Fail] r => Sem (RestAPI : r) a -> Sem r a
@@ -95,26 +97,26 @@ withHeaders modifyRequest = reinterpret $ \case
 compileTaskIO :: Members [ Embed IO, Logging, FileSystem ] r => Sem (CompileTask : r) a -> Sem r a
 compileTaskIO = interpret $ \case
     CompileTask project -> do
-        info $ "compiling haskell code: " <> project.name
+        info $ "compiling haskell code: " <> T.pack project.name
         result <- embed $ Compiler.compile project
         case result of
             -- FIXME show errors and warnings in info/warning log
             f@CompileFail {} -> do
                 warning "compilation failure"
-                info $ show f.compileWarnings
-                warning $ show f.compileErrors
+                info $ T.pack $ show f.compileWarnings
+                warning $ T.pack $ show f.compileErrors
                 return f
             s@CompileSuccess {} -> do
                 info "compilation success"
-                info $ show s.compileWarnings
+                info $ T.pack $ show s.compileWarnings
                 return s
 
 
 loggingIO :: Member (Embed IO) r => Sem (Logging : r) a -> Sem r a
 loggingIO = interpret $ \case
-    Info m -> embed $ putStrLn $ "info: " ++ m
-    Warning m -> embed $ putStrLn $ "warn: " ++ m
-    Error m -> embed $ putStrLn $ " err: " ++ m
+    Info m -> embed $ putStrLn $ "info: " <> T.unpack m
+    Warning m -> embed $ putStrLn $ "warn: " <> T.unpack m
+    Error m -> embed $ putStrLn $ " err: " <> T.unpack m
 
 loggingNull :: Sem (Logging : r) a -> Sem r a
 loggingNull = interpret $ \case
@@ -123,7 +125,7 @@ loggingNull = interpret $ \case
     Error _ -> pure ()
 
 failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
-failLog = interpret $ \(Fail e) -> error e >> throw e
+failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
 runUntrusted :: (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
 runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. restapiIO. compileTaskIO

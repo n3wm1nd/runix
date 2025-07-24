@@ -20,6 +20,7 @@ import System.FilePath
 import Data.List (isPrefixOf)
 import Data.Aeson
 import Data.ByteString.Lazy (ByteString)
+import Data.Text hiding (isPrefixOf)
 
 
 -- Effects
@@ -79,9 +80,9 @@ data RestAPI (m :: Type -> Type) a where
 makeSem ''RestAPI
 
 data Logging (m :: Type -> Type) a where
-    Info :: String -> Logging m ()
-    Warning :: String -> Logging m ()
-    Error :: String -> Logging m ()
+    Info :: Text -> Logging m ()
+    Warning :: Text -> Logging m ()
+    Error :: Text -> Logging m ()
 makeSem ''Logging
 
 data (Config c) (m :: Type -> Type ) a where
