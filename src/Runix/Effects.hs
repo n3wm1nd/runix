@@ -69,13 +69,13 @@ newtype Endpoint = Endpoint String
 newtype RestData a = RestData a
 newtype RestResponse a = RestResponse a
 
-data RestAPI (m :: Type -> Type) a where
-    RestGet :: (FromJSON s) => Endpoint -> RestAPI m s
-    RestPost :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI m s
-    RestPut :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI m s
-    RestDelete :: (FromJSON s) => Endpoint -> RestAPI m s
-    RestPatch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI m s
-    RestCustom :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI m s
+data RestAPI p (m :: Type -> Type) a where
+    RestGet :: (FromJSON s) => Endpoint -> RestAPI p m s
+    RestPost :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
+    RestPut :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
+    RestDelete :: (FromJSON s) => Endpoint -> RestAPI p m s
+    RestPatch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
+    RestCustom :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI p m s
 
 makeSem ''RestAPI
 
