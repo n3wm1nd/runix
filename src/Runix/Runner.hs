@@ -150,14 +150,14 @@ instance RestEndpoint Openrouter where
     authheaders a = [("Authorization", "Bearer " <> a.apikey)]
 
 llmOpenrouter :: Members [Fail, HTTP, RestAPI Openrouter, Logging] r => String -> Sem (LLM : r) a -> Sem r a
-llmOpenrouter model a = do
-    llmOpenrouterReq a
-    where
-        llmOpenrouterReq :: Members [Fail, RestAPI Openrouter] r => Sem (LLM : r) a -> Sem r a
-        llmOpenrouterReq = interpret $ \case
-            AskLLM query -> do
-                resp :: OpenrouterResponse <- restPost (Endpoint "chat/completions") OpenrouterQuery {model=model, messages=[OpenrouterMessage "user" query]}
-                return $ (\(c :: OpenrouterChoice) -> c.message.content) (head resp.choices) -- FIXME partial function, handle empty choices
+llmOpenrouter model = interpret $ \case
+    AskLLM query -> do
+        resp :: OpenrouterResponse <- restPost 
+            (Endpoint "chat/completions")
+            OpenrouterQuery { model=model, messages=[OpenrouterMessage "user" query]}
+        case resp.choices of
+            c:_ -> return c.message.content
+            [] -> fail "openrouter: no choices returned"
 
 secretEnv :: Members [Fail, Embed IO] r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
 secretEnv gensecret envname = interpret $ \case
