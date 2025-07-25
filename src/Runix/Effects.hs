@@ -72,12 +72,12 @@ newtype RestData a = RestData a
 newtype RestResponse a = RestResponse a
 
 data RestAPI p (m :: Type -> Type) a where
-    RestGet :: (FromJSON s) => Endpoint -> RestAPI p m s
-    RestPost :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
-    RestPut :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
-    RestDelete :: (FromJSON s) => Endpoint -> RestAPI p m s
-    RestPatch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
-    RestCustom :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI p m s
+    Get :: (FromJSON s) => Endpoint -> RestAPI p m s
+    Post :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
+    Put :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
+    Delete :: (FromJSON s) => Endpoint -> RestAPI p m s
+    Patch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
+    Rest :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI p m s
 makeSem ''RestAPI
 class RestEndpoint p where
     apiroot :: p -> String
@@ -154,12 +154,12 @@ makeSem ''CompileTask
 
 restapiHTTP :: (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
 restapiHTTP api = interpret $ \case
-    RestGet e -> request "GET" e Nothing
-    RestPost e d -> request "POST" e (Just $ encode d)
-    RestPut e d -> request "PUT" e (Just $ encode d)
-    RestDelete e -> request "DELETE" e Nothing
-    RestPatch e d -> request "PATCH" e (Just $ encode d)
-    RestCustom method e d -> request method e (fmap encode d)
+    Get e -> request "GET" e Nothing
+    Post e d -> request "POST" e (Just $ encode d)
+    Put e d -> request "PUT" e (Just $ encode d)
+    Delete e -> request "DELETE" e Nothing
+    Patch e d -> request "PATCH" e (Just $ encode d)
+    Rest method e d -> request method e (fmap encode d)
   where
     request :: (FromJSON a, Members [Fail, HTTP] r) =>
         String -> Endpoint -> Maybe ByteString -> Sem r a

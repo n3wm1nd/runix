@@ -60,7 +60,7 @@ instance RestEndpoint Openrouter where
 llmOpenrouter :: Members [Fail, HTTP, RestAPI Openrouter] r => String -> Sem (LLM : r) a -> Sem r a
 llmOpenrouter model = interpret $ \case
     AskLLM query -> do
-        resp :: OpenrouterResponse <- restPost 
+        resp :: OpenrouterResponse <- post
             (Endpoint "chat/completions")
             OpenrouterQuery { model=model, messages=[OpenrouterMessage "user" query]}
         case resp.choices of
