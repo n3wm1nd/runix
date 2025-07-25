@@ -20,7 +20,7 @@
 module Runix.Runner (runUntrusted) where
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
-import System.Environment (getEnv)
+import System.Environment (getEnv, lookupEnv)
 
 -- Polysemy libraries
 import Polysemy
@@ -162,10 +162,10 @@ llmOpenrouter model = interpret $ \case
 secretEnv :: Members [Fail, Embed IO] r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
 secretEnv gensecret envname = interpret $ \case
     GetSecret -> do
-        key <- embed $ getEnv envname
-        if key == ""
-            then fail $ "ENV " <> envname <> " is unset"
-            else pure $ gensecret key
+        mk <- embed $ lookupEnv envname
+        case mk of
+            Nothing -> fail $ "secretEnv: ENV " <> envname <> " is unset"
+            Just key -> pure $ gensecret key
 
 openrouter :: Members [Embed IO, Logging, Fail, HTTP] r => Sem (LLM : RestAPI Openrouter : r) a -> Sem r a
 openrouter = secretEnv OpenrouterKey "OPENROUTER_API" . orouterapi . llmOpenrouter "deepseek/deepseek-chat-v3-0324:free"
