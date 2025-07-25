@@ -51,15 +51,15 @@ limitSubpath p = limitedAccess (\case
 data HTTPRequest = HTTPRequest {
     method :: String,
     uri :: String,
-    headers :: [String],
+    headers :: [(String, String)],
     body :: Maybe ByteString
-}
+} deriving (Show)
 
 data HTTPResponse = HTTPResponse {
     code :: Int,
-    headers :: [String],
+    headers :: [(String, String)],
     body :: ByteString
-}
+} deriving (Show)
 
 data HTTP (m :: Type -> Type) a where
     HttpRequest :: HTTPRequest -> HTTP m HTTPResponse
