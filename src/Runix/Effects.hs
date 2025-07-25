@@ -9,6 +9,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+
 
 
 module Runix.Effects where
@@ -76,8 +78,10 @@ data RestAPI p (m :: Type -> Type) a where
     RestDelete :: (FromJSON s) => Endpoint -> RestAPI p m s
     RestPatch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
     RestCustom :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI p m s
-
 makeSem ''RestAPI
+class RestEndpoint p where
+    apiroot :: p -> String
+    authheaders :: p -> [(String, String)]
 
 data LLM (m :: Type -> Type) a where
     AskLLM :: Text -> LLM m Text
@@ -146,3 +150,29 @@ data CompileTask (m :: Type -> Type) a where
     CompileTask :: HaskellProject -> CompileTask m CompileResult
 
 makeSem ''CompileTask
+
+
+restapiHTTP :: (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
+restapiHTTP api = interpret $ \case
+    RestGet e -> request "GET" e Nothing
+    RestPost e d -> request "POST" e (Just $ encode d)
+    RestPut e d -> request "PUT" e (Just $ encode d)
+    RestDelete e -> request "DELETE" e Nothing
+    RestPatch e d -> request "PATCH" e (Just $ encode d)
+    RestCustom method e d -> request method e (fmap encode d)
+  where
+    request :: (FromJSON a, Members [Fail, HTTP] r) =>
+        String -> Endpoint -> Maybe ByteString -> Sem r a
+    request method (Endpoint endpoint) body =
+        httpRequest (HTTPRequest
+            { method = method
+            , uri = apiroot api </> endpoint
+            , headers = ("Content-Type", "application/json") : authheaders api
+            , body = body
+            } ) >>= parseResponse
+    parseResponse :: (FromJSON a, Member Fail r) =>
+        HTTPResponse -> Sem r a
+    parseResponse response =
+        case decode response.body of
+            Just result -> return result
+            Nothing -> fail $ "Failed to parse JSON response: " <> show response.body

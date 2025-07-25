@@ -30,6 +30,7 @@ import Polysemy.Error
 -- Local modules
 import Runix.Effects
 import qualified Runix.Compiler as Compiler
+import qualified Runix.Openrouter as Openrouter
 
 -- External libraries
 import Data.Aeson (encode, decode, FromJSON, ToJSON)
@@ -56,35 +57,8 @@ filesystemIO = interpret $ \case
         info $ "writing file: " <> T.pack p
         embed $ BL.writeFile p d
 
-class RestEndpoint p where
-    apiroot :: p -> String
-    authheaders :: p -> [(String, String)]
 
 
-restapiHTTP :: (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
-restapiHTTP api = interpret $ \case
-    RestGet e -> request "GET" e Nothing
-    RestPost e d -> request "POST" e (Just $ encode d)
-    RestPut e d -> request "PUT" e (Just $ encode d)
-    RestDelete e -> request "DELETE" e Nothing
-    RestPatch e d -> request "PATCH" e (Just $ encode d)
-    RestCustom method e d -> request method e (fmap encode d)
-  where
-    request :: (FromJSON a, Members [Fail, HTTP] r) =>
-        String -> Endpoint -> Maybe ByteString -> Sem r a
-    request method (Endpoint endpoint) body =
-        httpRequest (HTTPRequest
-            { method = method
-            , uri = apiroot api </> endpoint
-            , headers = ("Content-Type", "application/json") : authheaders api
-            , body = body
-            } ) >>= parseResponse
-    parseResponse :: (FromJSON a, Member Fail r) =>
-        HTTPResponse -> Sem r a
-    parseResponse response =
-        case decode response.body of
-            Just result -> return result
-            Nothing -> fail $ "Failed to parse JSON response: " <> show response.body
 
 -- HTTP interpreter with header support
 httpIO :: Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
@@ -113,52 +87,6 @@ httpIO = interpret $ \case
             , body = getResponseBody resp
             }
 
-data OpenrouterMessage = OpenrouterMessage {role :: String, content :: T.Text}
-    deriving (Generic, ToJSON, FromJSON)
-data OpenrouterQuery = OpenrouterQuery {model :: String, messages :: [OpenrouterMessage]}
-    deriving (Generic, ToJSON, FromJSON)
-newtype OpenrouterKey = OpenrouterKey String
-
-data OpenrouterResponse = OpenrouterResponse {
-    id :: String,
-    model :: String,
-    choices :: [OpenrouterChoice],
-    usage :: OpenrouterUsage
-    }
-    deriving (Generic, ToJSON, FromJSON)
-data OpenrouterUsage = OpenrouterUsage {
-    prompt_tokens :: Int,
-    completion_tokens :: Int,
-    total_tokens :: Int
-}
-    deriving (Generic, ToJSON, FromJSON)
-
-data OpenrouterChoice = OpenrouterChoice {
-    finish_reason :: String,
-    native_finish_reason :: String,
-    message :: OpenrouterMessage
-}
-    deriving (Generic, ToJSON, FromJSON)
-
-
-data Openrouter = Openrouter {
-    apikey :: String
-}
-
-instance RestEndpoint Openrouter where
-    apiroot _ = "https://openrouter.ai/api/v1/"
-    authheaders a = [("Authorization", "Bearer " <> a.apikey)]
-
-llmOpenrouter :: Members [Fail, HTTP, RestAPI Openrouter, Logging] r => String -> Sem (LLM : r) a -> Sem r a
-llmOpenrouter model = interpret $ \case
-    AskLLM query -> do
-        resp :: OpenrouterResponse <- restPost 
-            (Endpoint "chat/completions")
-            OpenrouterQuery { model=model, messages=[OpenrouterMessage "user" query]}
-        case resp.choices of
-            c:_ -> return c.message.content
-            [] -> fail "openrouter: no choices returned"
-
 secretEnv :: Members [Fail, Embed IO] r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
 secretEnv gensecret envname = interpret $ \case
     GetSecret -> do
@@ -167,13 +95,9 @@ secretEnv gensecret envname = interpret $ \case
             Nothing -> fail $ "secretEnv: ENV " <> envname <> " is unset"
             Just key -> pure $ gensecret key
 
-openrouter :: Members [Embed IO, Logging, Fail, HTTP] r => Sem (LLM : RestAPI Openrouter : r) a -> Sem r a
-openrouter = secretEnv OpenrouterKey "OPENROUTER_API" . orouterapi . llmOpenrouter "deepseek/deepseek-chat-v3-0324:free"
 
-orouterapi :: Members [Logging, Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
-orouterapi a = do
-    OpenrouterKey key <- getSecret
-    restapiHTTP (Openrouter { apikey = key }) (raiseUnder a)
+openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM : RestAPI Openrouter.Openrouter : r) a -> Sem r a
+openrouter = secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" . Openrouter.openrouterapi . Openrouter.llmOpenrouter "deepseek/deepseek-chat-v3-0324:free"
 
 
 

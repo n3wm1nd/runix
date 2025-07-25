@@ -62,7 +62,7 @@ library
     exposed-modules:  Runix.Runner, Runix.Effects
 
     -- Modules included in this library but not exported.
-    other-modules: Runix.Compiler, Runix.Compiler.Cabal
+    other-modules: Runix.Compiler, Runix.Compiler.Cabal, Runix.Openrouter
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
