@@ -7,14 +7,10 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE InstanceSigs #-}
 
 
 module Runix.Openrouter (Openrouter, openrouterapi, llmOpenrouter, OpenrouterKey(OpenrouterKey)) where
@@ -53,7 +49,7 @@ data OpenrouterChoice = OpenrouterChoice {
     deriving (Generic, ToJSON, FromJSON)
 
 
-data Openrouter = Openrouter {
+newtype Openrouter = Openrouter {
     apikey :: String
 }
 

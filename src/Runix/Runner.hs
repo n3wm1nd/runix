@@ -7,20 +7,14 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE InstanceSigs #-}
 
 
 module Runix.Runner (runUntrusted) where
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
-import System.Environment (getEnv, lookupEnv)
+import System.Environment (lookupEnv)
 
 -- Polysemy libraries
 import Polysemy
@@ -33,17 +27,12 @@ import qualified Runix.Compiler as Compiler
 import qualified Runix.Openrouter as Openrouter
 
 -- External libraries
-import Data.Aeson (encode, decode, FromJSON, ToJSON)
-import Data.ByteString.Lazy (ByteString)
 import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
-import GHC.Generics (Generic)
 import Data.String (fromString)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS))
-import Data.Maybe
-import System.FilePath ((</>))
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, CompileTask, LLM]
@@ -51,10 +40,10 @@ type SafeEffects = [FileSystem, HTTP, CompileTask, LLM]
 filesystemIO :: Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
 filesystemIO = interpret $ \case
     ReadFile p -> do
-        info $ "reading file: " <> T.pack p
+        info $ "reading file: " <> fromString p
         embed $ BL.readFile p
     WriteFile p d -> do
-        info $ "writing file: " <> T.pack p
+        info $ "writing file: " <> fromString p
         embed $ BL.writeFile p d
 
 
