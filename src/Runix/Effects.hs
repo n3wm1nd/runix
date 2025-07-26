@@ -23,6 +23,7 @@ import Data.List (isPrefixOf)
 import Data.Aeson
 import Data.ByteString.Lazy (ByteString)
 import Data.Text hiding (isPrefixOf)
+import GHC.Stack (HasCallStack, withFrozenCallStack, CallStack, callStack)
 
 
 -- Effects
@@ -89,10 +90,16 @@ makeSem ''LLM
 
 
 data Logging (m :: Type -> Type) a where
-    Info :: Text -> Logging m ()
-    Warning :: Text -> Logging m ()
-    Error :: Text -> Logging m ()
-makeSem ''Logging
+    Info :: HasCallStack => CallStack -> Text -> Logging m ()
+    Warning :: HasCallStack => CallStack -> Text -> Logging m ()
+    Error :: HasCallStack => CallStack -> Text -> Logging m ()
+--makeSem ''Logging
+info :: HasCallStack => Member Logging r => Text -> Sem r ()
+info t = withFrozenCallStack $ send (Info callStack t) 
+warning :: HasCallStack => Member Logging r => Text -> Sem r ()
+warning t = withFrozenCallStack $ send (Warning callStack t)
+error :: HasCallStack => Member Logging r => Text -> Sem r ()
+error t = withFrozenCallStack $ send (Runix.Effects.Error callStack t)
 
 data (Config c) (m :: Type -> Type ) a where
     GetConfig :: (Config c) m c

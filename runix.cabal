@@ -126,4 +126,5 @@ test-suite runix-test
     -- Test dependencies.
     build-depends:
         base, 
-        runix
+        runix,
+        polysemy

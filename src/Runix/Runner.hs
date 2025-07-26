@@ -31,11 +31,13 @@ import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
-import Data.String (fromString)
-import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS))
+import Data.String (fromString, IsString)
+import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), defaultPath)
+import GHC.Stack
+import Data.List (intersperse, intercalate)
 
 -- Engine
-type SafeEffects = [FileSystem, HTTP, CompileTask, LLM]
+type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM]
 
 filesystemIO :: Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
 filesystemIO = interpret $ \case
@@ -120,22 +122,28 @@ compileTaskIO = interpret $ \case
                 return s
 
 
-loggingIO :: Member (Embed IO) r => Sem (Logging : r) a -> Sem r a
-loggingIO = interpret $ \case
-    Info m -> embed $ putStrLn $ "info: " <> T.unpack m
-    Warning m -> embed $ putStrLn $ "warn: " <> T.unpack m
-    Error m -> embed $ putStrLn $ " err: " <> T.unpack m
+loggingIO :: (HasCallStack, Member (Embed IO) r) => Sem (Logging : r) a -> Sem r a
+loggingIO = interpret $ \v -> do
+    case v of
+        Info cs m -> embed $ putStrLn $ "info: " <> l cs m
+        Warning cs m -> embed $ putStrLn $ "warn: " <> l cs m
+        Error cs m -> embed $ putStrLn $ " err: " <> l cs m
+    where
+        l cs m = funname (getCallStack cs) <> T.unpack m
+        funname (_:f:frames) = (intercalate "." . reverse . map fst) (f:frames) <> ": "
+        funname _ = ""
 
 loggingNull :: Sem (Logging : r) a -> Sem r a
 loggingNull = interpret $ \case
-    Info _ -> pure ()
-    Warning _ -> pure ()
-    Error _ -> pure ()
+    Info _ _ -> pure ()
+    Warning _ _ -> pure ()
+    Error _ _ -> pure ()
 
 failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
 failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
-runUntrusted :: (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
+<<<<<<< HEAD
+runUntrusted :: HasCallStack => (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
 runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. openrouter .  compileTaskIO
 
 x :: Member LLM r => Sem r T.Text
@@ -145,3 +153,7 @@ x = do
 rx :: IO (Either String T.Text)
 rx = do
     runUntrusted x
+=======
+runUntrusted :: (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
+runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. openrouter .  compileTaskIO
+>>>>>>> 671107e (fixup: 3ca587e3b264c57209c979743616dc48ec0c284f)
