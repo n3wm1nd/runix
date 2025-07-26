@@ -31,10 +31,10 @@ import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
-import Data.String (fromString, IsString)
-import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), defaultPath)
+import Data.String (fromString)
+import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS))
 import GHC.Stack
-import Data.List (intersperse, intercalate)
+import Data.List (intercalate)
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM]
