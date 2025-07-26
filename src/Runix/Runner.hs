@@ -61,7 +61,7 @@ httpIO = interpret $ \case
             Left e -> fail $
                 "error parsing uri: " <> request.uri <> "\n" <> show e
         let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
-        info $ "setting headers: " <> fromString (show hdrs)
+        -- info $ "setting headers: " <> fromString (show hdrs)
         let hr :: Request =
                 setRequestMethod (fromString request.method) .
                 setRequestHeaders hdrs .
@@ -69,8 +69,8 @@ httpIO = interpret $ \case
                     Just b -> setRequestBody (RequestBodyLBS b)
                     Nothing -> Prelude.id
                 $ req
-        info $ "sending request: " <> fromString (show hr)
-        info $ "with data: " <> fromString (show request.body)
+        info $ fromString request.method <> " " <> fromString request.uri
+        -- info $ "with data: " <> fromString (show request.body)
         resp <- httpLBS hr
         return $ HTTPResponse
             { code = getResponseStatusCode resp
