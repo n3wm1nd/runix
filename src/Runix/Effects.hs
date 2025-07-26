@@ -159,7 +159,7 @@ data CompileTask (m :: Type -> Type) a where
 makeSem ''CompileTask
 
 
-restapiHTTP :: (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
+restapiHTTP :: HasCallStack => (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
 restapiHTTP api = interpret $ \case
     Get e -> request "GET" e Nothing
     Post e d -> request "POST" e (Just $ encode d)

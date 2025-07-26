@@ -39,7 +39,7 @@ import Data.List (intercalate)
 -- Engine
 type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM]
 
-filesystemIO :: Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
+filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
 filesystemIO = interpret $ \case
     ReadFile p -> do
         info $ "reading file: " <> fromString p
@@ -52,7 +52,7 @@ filesystemIO = interpret $ \case
 
 
 -- HTTP interpreter with header support
-httpIO :: Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
+httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
 httpIO = interpret $ \case
     HttpRequest request -> do
         let parsed = CMC.catch (parseRequest request.uri) Left
@@ -61,7 +61,7 @@ httpIO = interpret $ \case
             Left e -> fail $
                 "error parsing uri: " <> request.uri <> "\n" <> show e
         let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
-        info $ "rest: setting headers: " <> fromString (show hdrs)
+        info $ "setting headers: " <> fromString (show hdrs)
         let hr :: Request =
                 setRequestMethod (fromString request.method) .
                 setRequestHeaders hdrs .
@@ -69,8 +69,8 @@ httpIO = interpret $ \case
                     Just b -> setRequestBody (RequestBodyLBS b)
                     Nothing -> Prelude.id
                 $ req
-        info $ "rest: sending request: " <> fromString (show hr)
-        info $ "rest: with data: " <> fromString (show request.body)
+        info $ "sending request: " <> fromString (show hr)
+        info $ "with data: " <> fromString (show request.body)
         resp <- httpLBS hr
         return $ HTTPResponse
             { code = getResponseStatusCode resp
@@ -105,7 +105,7 @@ withHeaders modifyRequest = intercept $ \case
 -- authenticatedRequest = withHeaders $ \req -> req { headers = ("Authorization", "Bearer token123") : headers req }
 
 
-compileTaskIO :: Members [ Embed IO, Logging, FileSystem ] r => Sem (CompileTask : r) a -> Sem r a
+compileTaskIO :: HasCallStack => Members [ Embed IO, Logging, FileSystem ] r => Sem (CompileTask : r) a -> Sem r a
 compileTaskIO = interpret $ \case
     CompileTask project -> do
         info $ "compiling haskell code: " <> T.pack project.name
@@ -122,7 +122,7 @@ compileTaskIO = interpret $ \case
                 return s
 
 
-loggingIO :: (HasCallStack, Member (Embed IO) r) => Sem (Logging : r) a -> Sem r a
+loggingIO :: HasCallStack => Member (Embed IO) r => Sem (Logging : r) a -> Sem r a
 loggingIO = interpret $ \v -> do
     case v of
         Info cs m -> embed $ putStrLn $ "info: " <> l cs m

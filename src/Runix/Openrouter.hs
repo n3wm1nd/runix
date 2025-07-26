@@ -20,6 +20,7 @@ import Polysemy.Fail
 import GHC.Generics
 import Data.Aeson
 import qualified Data.Text as T
+import GHC.Stack (HasCallStack)
 
 data OpenrouterMessage = OpenrouterMessage {role :: String, content :: T.Text}
     deriving (Generic, ToJSON, FromJSON)
@@ -57,7 +58,7 @@ instance RestEndpoint Openrouter where
     apiroot _ = "https://openrouter.ai/api/v1/"
     authheaders a = [("Authorization", "Bearer " <> a.apikey)]
 
-llmOpenrouter :: Members [Fail, HTTP, RestAPI Openrouter] r => String -> Sem (LLM : r) a -> Sem r a
+llmOpenrouter :: HasCallStack => Members [Fail, HTTP, RestAPI Openrouter] r => String -> Sem (LLM : r) a -> Sem r a
 llmOpenrouter model = interpret $ \case
     AskLLM query -> do
         resp :: OpenrouterResponse <- post
@@ -67,7 +68,7 @@ llmOpenrouter model = interpret $ \case
             c:_ -> return c.message.content
             [] -> fail "openrouter: no choices returned"
 
-openrouterapi :: Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
+openrouterapi :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
 openrouterapi a = do
     OpenrouterKey key <- getSecret
     restapiHTTP (Openrouter { apikey = key }) (raiseUnder a)
