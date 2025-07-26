@@ -127,4 +127,5 @@ test-suite runix-test
     build-depends:
         base, 
         runix,
+        text,
         polysemy

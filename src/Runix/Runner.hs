@@ -142,18 +142,5 @@ loggingNull = interpret $ \case
 failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
 failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
-<<<<<<< HEAD
 runUntrusted :: HasCallStack => (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
 runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. openrouter .  compileTaskIO
-
-x :: Member LLM r => Sem r T.Text
-x = do
-    askLLM "what is the answer to life, the universe, and everything?"
-
-rx :: IO (Either String T.Text)
-rx = do
-    runUntrusted x
-=======
-runUntrusted :: (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. openrouter .  compileTaskIO
->>>>>>> 671107e (fixup: 3ca587e3b264c57209c979743616dc48ec0c284f)
