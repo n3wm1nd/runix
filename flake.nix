@@ -34,9 +34,9 @@
             pkgs.cabal-install
             pkgs.cabal2nix
           ];
-          shellHook = ''
-            export GHC_PACKAGE_PATH=$NIX_GHC_LIBDIR/package.conf.d
-          '';
+#          shellHook = ''
+#            export GHC_PACKAGE_PATH=$NIX_GHC_LIBDIR/package.conf.d
+#          '';
           withHoogle = true;
           packages = p : with p; [
             polysemy
