@@ -11,10 +11,10 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
 
-module Runix.Runner (runUntrusted) where
+module Runix.Runner (runUntrusted, cliRunner, Task(..)) where
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, getArgs)
 
 -- Polysemy libraries
 import Polysemy
@@ -34,7 +34,11 @@ import qualified Data.Text as T
 import Data.String (fromString)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS))
 import GHC.Stack
-import Data.List (intercalate)
+import Data.List (intercalate, find, uncons)
+import Data.Aeson (FromJSON, ToJSON, decode, encode, eitherDecode)
+import System.Exit (exitFailure)
+import System.IO (stderr)
+import GHC.IO.Handle (hPutStr)
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM]
@@ -144,3 +148,30 @@ failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
 runUntrusted :: HasCallStack => (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
 runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. openrouter .  compileTaskIO
+
+-- Task representation
+data Task where
+  Task :: (FromJSON a, ToJSON b) =>
+    { taskName :: String
+    , taskFunc :: a -> (forall r . Members SafeEffects r => Sem r b)
+    } -> Task
+
+-- CLI Runner implementation
+cliRunner :: [Task] -> IO ()
+cliRunner tasks = do
+  result <- runM . runError $ do
+    args <- embed getArgs
+    tName <- note "no taskname given" $ fmap fst (uncons args)
+
+    -- Find the task by name
+    Task _name taskFn <-
+      note ("Error: Task '" <> tName <> "' not found") $
+      find ( (== tName) . taskName) tasks
+
+    input <- embed BL.getContents >>= fromEither . eitherDecode
+
+    output <- embed $ runUntrusted (taskFn input)
+    fromEither $ fmap encode output
+  case result of
+    Right o -> BL.putStr o
+    Left e -> hPutStr stderr e >> exitFailure
