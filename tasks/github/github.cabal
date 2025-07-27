@@ -3,15 +3,14 @@ name: github
 version: 1.0.0
 synopsis: GitHub integration package for Runix
 description: 
-  Provides GitHub domain operations, tasks, and Git effect for Runix.
-  Includes repository management, issue tracking, and Git workflow automation.
+  Provides GitHub domain operations and tasks for Runix.
+  Includes repository management and GitHub API integration.
 author: .newmind
 license: MIT
 
 library
   exposed-modules: 
     GitHub
-    GitHub.Effects
   other-modules:
     GitHub.API
   build-depends: 
