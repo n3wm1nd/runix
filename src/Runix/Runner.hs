@@ -59,10 +59,10 @@ filesystemIO = interpret $ \case
 httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
 httpIO = interpret $ \case
     HttpRequest request -> do
-        let parsed = CMC.catch (parseRequest request.uri) Left
+        parsed <- embed $ CMC.try (parseRequest request.uri)
         req <- case parsed of
             Right r -> return r
-            Left e -> fail $
+            Left (e :: CMC.SomeException) -> fail $
                 "error parsing uri: " <> request.uri <> "\n" <> show e
         let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
         -- info $ "setting headers: " <> fromString (show hdrs)
