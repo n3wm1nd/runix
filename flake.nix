@@ -11,17 +11,21 @@
       pkgs = nixpkgs.legacyPackages.${system};
       haskellPackages = pkgs.haskellPackages;
 
-      builder = import ./builder.nix {pkgs = nixpkgs.legacyPackages.${system};};
+      builder = import ./builder.nix {pkgs = nixpkgs.legacyPackages.${system};}; 
       runix = haskellPackages.developPackage {
           name = "runix";
           root = ./.;
         };
+
+      # Import templates and task-init script
+      templatesModule = import ./templates.nix { inherit pkgs; };
     in
     {
       packages.${system} = {
         default = runix;
         runix = runix;
         builder = builder;
+        task-init = templatesModule.task-init;
       };
 
       devShells.${system} = {
@@ -44,6 +48,10 @@
             http-conduit
             ];
         };
+      };
+
+      templates = {
+        task = templatesModule.templates.task;
       };
     };
 }

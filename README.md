@@ -30,8 +30,32 @@ nix build github:runix/runix-core#cli
 ```
 
 ### Creating Your Own Task
+
+The easiest way to create a new task is using Runix's built-in template system:
+
 ```bash
-# 1. Create a new task
+# 1. Navigate to tasks directory
+cd tasks
+
+# 2. Create new task from template
+nix flake new --template ../.#task my-automation
+
+# 3. Initialize the template with proper names
+nix run ../.#task-init my-automation
+
+# 4. Start development
+cd my-automation
+nix develop
+```
+
+This creates a complete task structure with:
+- Properly named `.cabal` file with correct dependencies
+- Haskell module with basic task structure
+- Development environment with all necessary tools
+
+**Manual Creation (Alternative)**:
+```bash
+# 1. Create a new task manually
 mkdir my-automation && cd my-automation
 
 # 2. Create standard cabal file
@@ -42,7 +66,7 @@ synopsis: My personal automation task
 
 library
   exposed-modules: MyAutomation
-  build-depends: base, runix
+  build-depends: base, runix, polysemy
   hs-source-dirs: src
   default-language: Haskell2010
 EOF
@@ -60,8 +84,7 @@ automationTask inputFile = do
   return $ "Processed " <> show (length (lines content)) <> " lines"
 EOF
 
-# 4. Test locally (optional - create flake.nix for development)
-nix flake init -t github:runix/runix-packages#task
+# 4. Set up development environment
 nix develop
 
 # 5. Lock dependencies and publish
