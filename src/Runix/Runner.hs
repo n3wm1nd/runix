@@ -11,7 +11,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
 
-module Runix.Runner (runUntrusted, cliRunner, Task(..)) where
+module Runix.Runner (runUntrusted, cliRunner, Task(..), SafeEffects) where
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
 import System.Environment (lookupEnv, getArgs)
