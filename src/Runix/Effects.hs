@@ -59,6 +59,39 @@ limitSubpath p = limitedAccess (\case
     _ -> ForbidAccess $ p ++ " is not in explicitly allowed path " ++ p
     )
 
+-- Chroot into a subdirectory by rewriting paths relative to the chroot path
+chrootSubpath :: Member FileSystem r => FilePath -> Sem (FileSystem : r) a -> Sem (FileSystem : r) a
+chrootSubpath chrootPath = intercept $ \case
+    ReadFile f -> readFile (chrootPath </> f)
+    WriteFile f c -> writeFile (chrootPath </> f) c
+    ListFiles f -> do
+        files <- listFiles (chrootPath </> f)
+        -- Remove the chroot prefix from returned paths
+        return $ fmap (makeRelative chrootPath) files
+    FileExists f -> fileExists (chrootPath </> f)
+    IsDirectory f -> isDirectory (chrootPath </> f)
+
+-- Hide dotfiles (files starting with '.')
+hideDotfiles :: Members [FileSystem, Fail] r => Sem (FileSystem : r) a -> Sem (FileSystem : r) a
+hideDotfiles = intercept $ \case 
+    ReadFile f | isDotfile f -> fail $ "Access to dotfile denied: " ++ f
+                | otherwise -> readFile f
+    WriteFile f c | isDotfile f -> fail $ "Access to dotfile denied: " ++ f
+                  | otherwise -> writeFile f c
+    ListFiles f -> do
+        files <- listFiles f
+        -- Filter out dotfiles from the listing
+        return $ Prelude.filter (not . isDotfile . takeFileName) files
+    FileExists f | isDotfile f -> return False  -- Hide existence of dotfiles
+                 | otherwise -> fileExists f
+    IsDirectory f | isDotfile f -> return False  -- Hide existence of dot directories
+                  | otherwise -> isDirectory f
+  where
+    isDotfile :: FilePath -> Bool
+    isDotfile path = case takeFileName path of
+        ('.':_) -> True
+        _ -> False
+
 
 data HTTPRequest = HTTPRequest {
     method :: String,
