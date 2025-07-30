@@ -155,6 +155,7 @@ Effects provide a way to bring potentially non-pure actions (like file system or
 - `FileSystem`: File read/write operations
 - `RestAPI`: HTTP requests  
 - `CompileTask`: Dynamic Haskell compilation
+- `LLM`: Large Language Model interactions with type-safe abstractions
 - *(More effects planned)*
 
 Effects are implemented using the Polysemy library, which allows for flexible and secure effect management.
@@ -322,10 +323,17 @@ myTask params = do
 | `FileSystem` | `readFile`, `writeFile` | `tryReadFile`, `tryWriteFile` | Limited to specified directories |
 | `RestAPI` | `restPost`, `restGet` | `tryRestPost`, `tryRestGet` | Restricted to whitelisted endpoints |
 | `CompileTask` | `compileTask`, `saveProject` | `tryCompileTask`, `trySaveProject` | Sandboxed compilation environment |
+| `LLM` | `askLLM`, `queryLLM` | Type-safe `createFrom`, `updateWith` | Model access controls and prompting constraints |
 
 **Dual Interface Pattern**: Each effect provides two interfaces:
 - **Simple interface**: Operations fail and terminate the task on error (e.g., `readFile`)
 - **Try interface**: Operations return `Maybe` results for explicit error handling (e.g., `tryReadFile`)
+
+**LLM Type System**: The LLM effect includes a type-safe abstraction layer:
+- **LLMInput types**: Define how data is fed to LLMs with semantic descriptions
+- **LLMOutput types**: Define how to parse and prompt for specific content types
+- **Type-safe operations**: `createFrom @OutputType inputData` generates appropriate prompts automatically
+- **Context management**: Built-in support for conversation history and context scoping
 
 ### Security Model
 Security is primarily handled at the compilation stage:
