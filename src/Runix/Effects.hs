@@ -23,6 +23,7 @@ import Data.List (isPrefixOf)
 import Data.Aeson
 import Data.ByteString.Lazy (ByteString)
 import Data.Text hiding (isPrefixOf)
+import qualified Data.Text.Lazy as TL
 import GHC.Stack (HasCallStack, withFrozenCallStack, CallStack, callStack)
 
 
@@ -126,8 +127,13 @@ class RestEndpoint p where
     apiroot :: p -> String
     authheaders :: p -> [(String, String)]
 
+
+type MessageHistory = [TL.Text]
+newtype LLMInstructions = LLMInstructions TL.Text
 data LLM (m :: Type -> Type) a where
-    AskLLM :: Text -> LLM m Text
+    AskLLM :: TL.Text -> LLM m TL.Text
+    QueryLLM :: LLMInstructions -> TL.Text -> LLM m TL.Text 
+    QueryLLMWithHistory :: LLMInstructions -> MessageHistory -> Text -> LLM m (MessageHistory, Text)
 makeSem ''LLM
 
 

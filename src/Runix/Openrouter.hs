@@ -20,9 +20,10 @@ import Polysemy.Fail
 import GHC.Generics
 import Data.Aeson
 import qualified Data.Text as T
+import qualified Data.Text.Lazy as TL
 import GHC.Stack (HasCallStack)
 
-data OpenrouterMessage = OpenrouterMessage {role :: String, content :: T.Text}
+data OpenrouterMessage = OpenrouterMessage {role :: String, content :: TL.Text}
     deriving (Generic, ToJSON, FromJSON)
 data OpenrouterQuery = OpenrouterQuery {model :: String, messages :: [OpenrouterMessage]}
     deriving (Generic, ToJSON, FromJSON)
@@ -66,6 +67,29 @@ llmOpenrouter model = interpret $ \case
             OpenrouterQuery { model=model, messages=[OpenrouterMessage "user" query]}
         case resp.choices of
             c:_ -> return c.message.content
+            [] -> fail "openrouter: no choices returned"
+    
+    QueryLLM (LLMInstructions instructions) inputData -> do
+        let messages = [OpenrouterMessage "system" instructions, OpenrouterMessage "user" inputData]
+        resp :: OpenrouterResponse <- post
+            (Endpoint "chat/completions")
+            OpenrouterQuery { model=model, messages=messages}
+        case resp.choices of
+            c:_ -> return c.message.content
+            [] -> fail "openrouter: no choices returned"
+    
+    QueryLLMWithHistory (LLMInstructions instructions) history inputData -> do
+        let historyMessages = map (OpenrouterMessage "assistant") history
+        let currentMessages = historyMessages ++ 
+                             [OpenrouterMessage "system" instructions, 
+                              OpenrouterMessage "user" (TL.fromStrict inputData)]
+        resp :: OpenrouterResponse <- post
+            (Endpoint "chat/completions")
+            OpenrouterQuery { model=model, messages=currentMessages}
+        case resp.choices of
+            c:_ -> do
+                let newHistory = history ++ [c.message.content]
+                return (newHistory, TL.toStrict c.message.content)
             [] -> fail "openrouter: no choices returned"
 
 openrouterapi :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
