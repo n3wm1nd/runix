@@ -13,11 +13,19 @@ import qualified Data.Text.Lazy as TL
 import Data.Aeson (FromJSON, ToJSON, encode, decode)
 import qualified Data.Text.Lazy.Encoding as TLE
 import Polysemy
-import Polysemy.Fail
 import Runix.Effects (LLM, askLLM, queryLLM, LLMInstructions(..))
 
--- | Types that can be created by LLM with specific prompting strategies
-class LLMCreatable a where
+-- | Types that can be converted to meaningful LLM input text
+class LLMInput a where
+    toLLMText :: a -> TL.Text
+    inputDescription :: Text  -- What this type represents for the LLM
+
+-- | Types that can be parsed from LLM output text with prompting strategies
+class LLMOutput a where
+    -- Parsing method
+    fromLLMText :: TL.Text -> a  -- Parse LLM output
+    
+    -- Prompting strategies
     description :: Text
     format :: Text
     format = "markdown"
@@ -39,46 +47,31 @@ class LLMCreatable a where
     promptCreation :: Text -> TL.Text
     promptCreation userPrompt = TL.fromStrict $ "Create " <> description @a <> " in " <> format @a <> " format. " <> userPrompt
 
--- | Types that can be converted to meaningful LLM input text
-class LLMInput a where
-    toLLMText :: a -> TL.Text
-    inputDescription :: Text  -- What this type represents for the LLM
-
--- | Types that can be parsed from LLM output text
-class LLMOutput a where
-    fromLLMText :: TL.Text -> Maybe a  -- Parse LLM output, Nothing on failure
-
 -- Core LLM functions using the typeclasses
-createFrom :: forall a b r. (LLMCreatable a, LLMOutput a, LLMInput b, Members '[LLM, Fail] r) => b -> Sem r a
+createFrom :: forall a b r. (LLMOutput a, LLMInput b, Members '[LLM] r) => b -> Sem r a
 createFrom input = do
     let instructions = creationPrompt @a (inputDescription @b)
     let inputData = toLLMText input
     result <- queryLLM (LLMInstructions instructions) inputData
-    case fromLLMText result of
-        Just parsed -> return parsed
-        Nothing -> fail $ "Failed to parse LLM output for " <> T.unpack (description @a)
+    return $ fromLLMText result
 
-updateWith :: forall a b r. (LLMCreatable a, LLMOutput a, LLMInput b, Members '[LLM, Fail] r) => a -> b -> Sem r a  
+updateWith :: forall a b r. (LLMOutput a, LLMInput b, Members '[LLM] r) => a -> b -> Sem r a  
 updateWith existing input = do
     let instructions = updatePrompt existing (inputDescription @b)
     let inputData = toLLMText input
     result <- queryLLM (LLMInstructions instructions) inputData
-    case fromLLMText result of
-        Just parsed -> return parsed
-        Nothing -> fail $ "Failed to parse LLM output for " <> T.unpack (description @a)
+    return $ fromLLMText result
 
-createPrompt :: forall a r. (LLMCreatable a, LLMOutput a, Members '[LLM, Fail] r) => Text -> Sem r a
+createPrompt :: forall a r. (LLMOutput a, Members '[LLM] r) => Text -> Sem r a
 createPrompt userPrompt = do
     result <- askLLM (promptCreation @a userPrompt)
-    case fromLLMText result of
-        Just parsed -> return parsed
-        Nothing -> fail $ "Failed to parse LLM output for " <> T.unpack (description @a)
+    return $ fromLLMText result
 
 -- Context management helpers
-referenceList :: LLMCreatable a => [a] -> TL.Text
+referenceList :: LLMOutput a => [a] -> TL.Text
 referenceList items = TL.fromStrict $ T.unlines [shortName item <> ": " <> distinctName item | item <- items]
 
-contextualPrompt :: LLMCreatable a => [a] -> TL.Text -> TL.Text  
+contextualPrompt :: LLMOutput a => [a] -> TL.Text -> TL.Text  
 contextualPrompt context prompt = 
     "Context:\n" <> referenceList context <> "\n\n" <> prompt
 
@@ -94,10 +87,18 @@ instance LLMInput TL.Text where
     inputDescription = "text content"
 
 instance LLMOutput Text where
-    fromLLMText = Just . TL.toStrict
+    fromLLMText = TL.toStrict
+    description = "text content"
+    distinctName = T.take 20 . T.filter (/= ' ')
+    shortName = const "Text"
+    contentText = TL.fromStrict
 
 instance LLMOutput TL.Text where
-    fromLLMText = Just
+    fromLLMText = id
+    description = "text content"
+    distinctName = T.take 20 . T.filter (/= ' ') . TL.toStrict
+    shortName = const "Text"
+    contentText = id
 
 -- List instances
 instance LLMInput a => LLMInput [a] where
@@ -118,5 +119,11 @@ instance (ToJSON a) => LLMInput (JSONInput a) where
     toLLMText (JSONInput a) = TLE.decodeUtf8 . encode $ a
     inputDescription = "JSON data"
 
-instance (FromJSON a) => LLMOutput (JSONOutput a) where
+-- For structured parsing that might fail, use Maybe
+instance (FromJSON a, ToJSON a) => LLMOutput (Maybe (JSONOutput a)) where
     fromLLMText = fmap JSONOutput . decode . TLE.encodeUtf8
+    description = "JSON data (might fail to parse)"
+    distinctName = const "maybe-json-data"
+    shortName = const "JSON?"
+    contentText (Just (JSONOutput a)) = TLE.decodeUtf8 . encode $ a
+    contentText Nothing = "(failed to parse JSON)"
