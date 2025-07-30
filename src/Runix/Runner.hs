@@ -15,6 +15,7 @@ module Runix.Runner (runUntrusted, cliRunner, Task(..), SafeEffects) where
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
 import System.Environment (lookupEnv, getArgs)
+import qualified System.Directory
 
 -- Polysemy libraries
 import Polysemy
@@ -51,6 +52,15 @@ filesystemIO = interpret $ \case
     WriteFile p d -> do
         info $ "writing file: " <> fromString p
         embed $ BL.writeFile p d
+    ListFiles p -> do
+        info $ "listing files: " <> fromString p
+        embed $ System.Directory.listDirectory p
+    FileExists p -> do
+        info $ "checking file exists: " <> fromString p
+        embed $ System.Directory.doesFileExist p
+    IsDirectory p -> do
+        info $ "checking is directory: " <> fromString p
+        embed $ System.Directory.doesDirectoryExist p
 
 
 
