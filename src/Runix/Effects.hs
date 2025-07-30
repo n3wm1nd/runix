@@ -30,6 +30,9 @@ import GHC.Stack (HasCallStack, withFrozenCallStack, CallStack, callStack)
 data FileSystem (m :: Type -> Type) a where
     ReadFile :: FilePath -> FileSystem m ByteString
     WriteFile :: FilePath -> ByteString -> FileSystem m ()
+    ListFiles :: FilePath -> FileSystem m [FilePath]
+    FileExists :: FilePath -> FileSystem m Bool
+    IsDirectory :: FilePath -> FileSystem m Bool
 
 makeSem ''FileSystem
 
@@ -40,6 +43,9 @@ limitedAccess isAllowed = intercept $ \action -> case isAllowed action of
     AllowAccess -> case action of
         ReadFile f -> readFile f
         WriteFile f c -> writeFile f c
+        ListFiles f -> listFiles f
+        FileExists f -> fileExists f
+        IsDirectory f -> isDirectory f
 
     ForbidAccess reason -> fail $ "not allowed: " ++ reason
 
@@ -47,6 +53,9 @@ limitSubpath :: (Member Fail r, Member FileSystem r) => FilePath -> Sem (FileSys
 limitSubpath p = limitedAccess (\case
     ReadFile sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
     WriteFile sp _c | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
+    ListFiles sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
+    FileExists sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
+    IsDirectory sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
     _ -> ForbidAccess $ p ++ " is not in explicitly allowed path " ++ p
     )
 
