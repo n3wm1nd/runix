@@ -15,65 +15,44 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import Polysemy
 import Runix.Effects (LLM, askLLM, queryLLM, LLMInstructions(..))
 
+-- | Text specifically formatted for LLM prompts
+type PromptText = TL.Text
+
 -- | Types that can be converted to meaningful LLM input text
 class LLMInput a where
-    toLLMText :: a -> TL.Text
+    toLLMText :: a -> PromptText
     inputDescription :: Text  -- What this type represents for the LLM
+    inputFormat :: Text               -- Format for LLM output (markdown, json, plain text, etc.)
+    inputFormat = "markdown"          -- Default format
 
--- | Types that can be parsed from LLM output text with prompting strategies
+-- | Types that can be parsed from LLM output text
 class LLMOutput a where
-    -- Parsing method
     fromLLMText :: TL.Text -> a  -- Parse LLM output
-    
-    -- Prompting strategies
-    description :: Text
-    format :: Text
-    format = "markdown"
-    
-    -- Creation instructions (data passed separately)
-    creationPrompt :: Text -> TL.Text
-    creationPrompt inputDesc = TL.fromStrict $ "Create " <> description @a <> " in " <> format @a <> " format from the provided " <> inputDesc <> "."
-    
-    -- Update instructions (data passed separately) 
-    updatePrompt :: a -> Text -> TL.Text
-    updatePrompt existing inputDesc = TL.fromStrict $ "Update this " <> description @a <> " with new information from the provided " <> inputDesc <> ".\n\nExisting content:\n" <> TL.toStrict (contentText existing)
-    
-    -- Reference methods for context management
-    distinctName :: a -> Text    -- unique identifier for referencing
-    shortName :: a -> Text       -- human-readable name
-    contentText :: a -> TL.Text  -- extract the actual text content
-    
-    -- User-prompt creation (no input, just instruction)
-    promptCreation :: Text -> TL.Text
-    promptCreation userPrompt = TL.fromStrict $ "Create " <> description @a <> " in " <> format @a <> " format. " <> userPrompt
+    description :: Text          -- What this type represents
+    format :: Text               -- Format for LLM output (markdown, json, plain text, etc.)
+    format = "markdown"          -- Default format
 
--- Core LLM functions using the typeclasses
-createFrom :: forall a b r. (LLMOutput a, LLMInput b, Members '[LLM] r) => b -> Sem r a
-createFrom input = do
-    let instructions = creationPrompt @a (inputDescription @b)
+-- Core LLM functions using the typeclasses with explicit prompts
+createFrom :: forall a b r. (LLMOutput a, LLMInput b, Members '[LLM] r) => TL.Text -> b -> Sem r a
+createFrom userPrompt input = do
+    let augmentedPrompt = userPrompt <> "\nCreate " <> TL.fromStrict (description @a) <> " in " <> TL.fromStrict (format @a) <> " format from the provided " <> TL.fromStrict (inputDescription @b) <> "."
     let inputData = toLLMText input
-    result <- queryLLM (LLMInstructions instructions) inputData
+    result <- queryLLM (LLMInstructions augmentedPrompt) inputData
     return $ fromLLMText result
 
-updateWith :: forall a b r. (LLMOutput a, LLMInput b, Members '[LLM] r) => a -> b -> Sem r a  
-updateWith existing input = do
-    let instructions = updatePrompt existing (inputDescription @b)
-    let inputData = toLLMText input
-    result <- queryLLM (LLMInstructions instructions) inputData
+updateWith :: forall a b r. (LLMOutput a, LLMInput a, LLMInput b, Members '[LLM] r) => TL.Text -> a -> b -> Sem r a  
+updateWith userPrompt existing input = do
+    let augmentedPrompt = userPrompt <> "\nUpdate " <> TL.fromStrict (description @a) <> " in " <> TL.fromStrict (format @a) <> " format using the provided " <> TL.fromStrict (inputDescription @b) <> "."
+    let combinedInput = "Existing content:\n" <> toLLMText existing <> "\n\nNew information:\n" <> toLLMText input
+    result <- queryLLM (LLMInstructions augmentedPrompt) combinedInput
     return $ fromLLMText result
 
-createPrompt :: forall a r. (LLMOutput a, Members '[LLM] r) => Text -> Sem r a
+createPrompt :: forall a r. (LLMOutput a, Members '[LLM] r) => TL.Text -> Sem r a
 createPrompt userPrompt = do
-    result <- askLLM (promptCreation @a userPrompt)
+    let augmentedPrompt = userPrompt <> "\nCreate " <> TL.fromStrict (description @a) <> " in " <> TL.fromStrict (format @a) <> " format."
+    result <- askLLM augmentedPrompt
     return $ fromLLMText result
 
--- Context management helpers
-referenceList :: LLMOutput a => [a] -> TL.Text
-referenceList items = TL.fromStrict $ T.unlines [shortName item <> ": " <> distinctName item | item <- items]
-
-contextualPrompt :: LLMOutput a => [a] -> TL.Text -> TL.Text  
-contextualPrompt context prompt = 
-    "Context:\n" <> referenceList context <> "\n\n" <> prompt
 
 -- Basic instances for common types
 
@@ -89,16 +68,12 @@ instance LLMInput TL.Text where
 instance LLMOutput Text where
     fromLLMText = TL.toStrict
     description = "text content"
-    distinctName = T.take 20 . T.filter (/= ' ')
-    shortName = const "Text"
-    contentText = TL.fromStrict
+    format = "plain text"
 
 instance LLMOutput TL.Text where
     fromLLMText = id
     description = "text content"
-    distinctName = T.take 20 . T.filter (/= ' ') . TL.toStrict
-    shortName = const "Text"
-    contentText = id
+    format = "plain text"
 
 -- List instances
 instance LLMInput a => LLMInput [a] where
@@ -123,7 +98,4 @@ instance (ToJSON a) => LLMInput (JSONInput a) where
 instance (FromJSON a, ToJSON a) => LLMOutput (Maybe (JSONOutput a)) where
     fromLLMText = fmap JSONOutput . decode . TLE.encodeUtf8
     description = "JSON data (might fail to parse)"
-    distinctName = const "maybe-json-data"
-    shortName = const "JSON?"
-    contentText (Just (JSONOutput a)) = TLE.decodeUtf8 . encode $ a
-    contentText Nothing = "(failed to parse JSON)"
+    format = "JSON"
