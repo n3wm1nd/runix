@@ -23,9 +23,12 @@ import Polysemy.Fail
 import Polysemy.Error
 
 -- Local modules
-import Runix.Effects
-import qualified Runix.Compiler as Compiler
-import qualified Runix.Openrouter as Openrouter
+import Runix.FileSystem.Effects
+import Runix.HTTP.Effects
+import Runix.Logging.Effects
+import Runix.RestAPI.Effects
+import qualified Runix.Compiler.Compiler as Compiler
+import qualified Runix.LLM.Openrouter as Openrouter
 
 -- External libraries
 import Network.HTTP.Simple
@@ -40,6 +43,9 @@ import Data.Aeson (FromJSON, ToJSON, decode, encode, eitherDecode)
 import System.Exit (exitFailure)
 import System.IO (stderr)
 import GHC.IO.Handle (hPutStr)
+import Runix.Compiler.Effects
+import Runix.LLM.Effects
+import Runix.Secret.Effects
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM]

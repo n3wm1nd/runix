@@ -13,8 +13,10 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
 
-module Runix.Openrouter (Openrouter, openrouterapi, llmOpenrouter, OpenrouterKey(OpenrouterKey)) where
-import Runix.Effects
+module Runix.LLM.Openrouter (Openrouter, openrouterapi, llmOpenrouter, OpenrouterKey(OpenrouterKey)) where
+import Runix.Secret.Effects
+import Runix.LLM.Effects
+import Runix.RestAPI.Effects
 import Polysemy
 import Polysemy.Fail
 import GHC.Generics
@@ -22,6 +24,7 @@ import Data.Aeson
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import GHC.Stack (HasCallStack)
+import Runix.HTTP.Effects
 
 data OpenrouterMessage = OpenrouterMessage {role :: String, content :: TL.Text}
     deriving (Generic, ToJSON, FromJSON)

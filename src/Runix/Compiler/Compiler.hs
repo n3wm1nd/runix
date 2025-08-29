@@ -6,12 +6,12 @@
 
 
 
-module Runix.Compiler
+module Runix.Compiler.Compiler
     (
         compile
     ) where
 
-import Runix.Effects
+import Runix.Compiler.Effects
 import qualified Runix.Compiler.Cabal as CC
 import qualified Distribution.ModuleName
 

@@ -59,10 +59,19 @@ library
     import:           warnings
 
     -- Modules exported by the library.
-    exposed-modules:  Runix.Runner, Runix.Effects, Runix.LLMTypes
+    exposed-modules:  Runix.Runner,
+        Runix.Config.Effects,
+        Runix.Secret.Effects,
+        Runix.Logging.Effects,
+        Runix.FileSystem.Effects,
+        Runix.HTTP.Effects,
+        Runix.RestAPI.Effects,
+        Runix.LLM.Effects,
+        Runix.Compiler.Effects
+
 
     -- Modules included in this library but not exported.
-    other-modules: Runix.Compiler, Runix.Compiler.Cabal, Runix.Openrouter
+    other-modules: Runix.Compiler.Compiler, Runix.Compiler.Cabal, Runix.LLM.Openrouter
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
