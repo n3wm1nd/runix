@@ -47,8 +47,13 @@ import Runix.Compiler.Effects
 import Runix.LLM.Effects
 import Runix.Secret.Effects
 
+
+data FallbackModel = FallbackModel
+instance LLMModel FallbackModel where
+    modelidentifier _ = "deepseek/deepseek-chat-v3-0324:free"
+
 -- Engine
-type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM]
+type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM FallbackModel]
 
 filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
 filesystemIO = interpret $ \case
@@ -107,8 +112,8 @@ secretEnv gensecret envname = interpret $ \case
             Just key -> pure $ gensecret key
 
 
-openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM : RestAPI Openrouter.Openrouter : r) a -> Sem r a
-openrouter = secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" . Openrouter.openrouterapi . Openrouter.llmOpenrouter "deepseek/deepseek-chat-v3-0324:free"
+openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM FallbackModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
+openrouter = secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" . Openrouter.openrouterapi . Openrouter.llmOpenrouter FallbackModel
 
 
 

@@ -16,8 +16,11 @@ import Data.Text (Text)
 
 type MessageHistory = [TL.Text]
 newtype LLMInstructions = LLMInstructions TL.Text
-data LLM (m :: Type -> Type) a where
-    AskLLM :: TL.Text -> LLM m TL.Text
-    QueryLLM :: LLMInstructions -> TL.Text -> LLM m TL.Text 
-    QueryLLMWithHistory :: LLMInstructions -> MessageHistory -> Text -> LLM m (MessageHistory, Text)
+data LLM model (m :: Type -> Type) a where
+    AskLLM :: TL.Text -> LLM model m TL.Text
+    QueryLLM :: LLMInstructions -> TL.Text -> LLM model m TL.Text 
+    QueryLLMWithHistory :: LLMInstructions -> MessageHistory -> Text -> LLM model m (MessageHistory, Text)
 makeSem ''LLM
+
+class LLMModel model where
+    modelidentifier :: model -> String

@@ -62,12 +62,12 @@ instance RestEndpoint Openrouter where
     apiroot _ = "https://openrouter.ai/api/v1/"
     authheaders a = [("Authorization", "Bearer " <> a.apikey)]
 
-llmOpenrouter :: HasCallStack => Members [Fail, HTTP, RestAPI Openrouter] r => String -> Sem (LLM : r) a -> Sem r a
+llmOpenrouter :: HasCallStack => LLMModel model => Members [Fail, HTTP, RestAPI Openrouter] r => model -> Sem (LLM model: r) a -> Sem r a
 llmOpenrouter model = interpret $ \case
     AskLLM query -> do
         resp :: OpenrouterResponse <- post
             (Endpoint "chat/completions")
-            OpenrouterQuery { model=model, messages=[OpenrouterMessage "user" query]}
+            OpenrouterQuery { model=modelidentifier model, messages=[OpenrouterMessage "user" query]}
         case resp.choices of
             c:_ -> return c.message.content
             [] -> fail "openrouter: no choices returned"
@@ -76,7 +76,7 @@ llmOpenrouter model = interpret $ \case
         let messages = [OpenrouterMessage "system" instructions, OpenrouterMessage "user" inputData]
         resp :: OpenrouterResponse <- post
             (Endpoint "chat/completions")
-            OpenrouterQuery { model=model, messages=messages}
+            OpenrouterQuery { model=modelidentifier model, messages=messages}
         case resp.choices of
             c:_ -> return c.message.content
             [] -> fail "openrouter: no choices returned"
@@ -88,7 +88,7 @@ llmOpenrouter model = interpret $ \case
                               OpenrouterMessage "user" (TL.fromStrict inputData)]
         resp :: OpenrouterResponse <- post
             (Endpoint "chat/completions")
-            OpenrouterQuery { model=model, messages=currentMessages}
+            OpenrouterQuery { model=modelidentifier model, messages=currentMessages}
         case resp.choices of
             c:_ -> do
                 let newHistory = history ++ [c.message.content]
