@@ -9,6 +9,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TypeApplications #-}
 
 
 module Runix.Runner (runUntrusted, cliRunner, Task(..), SafeEffects) where
@@ -49,8 +50,7 @@ import Runix.Secret.Effects
 
 
 data FallbackModel = FallbackModel
-instance LLMModel FallbackModel where
-    modelidentifier _ = "deepseek/deepseek-chat-v3-0324:free"
+ 
 
 -- Engine
 type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM FallbackModel]
@@ -113,7 +113,7 @@ secretEnv gensecret envname = interpret $ \case
 
 
 openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM FallbackModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
-openrouter = secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" . Openrouter.openrouterapi . Openrouter.llmOpenrouter FallbackModel
+openrouter = secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" . Openrouter.openrouterapi . Openrouter.llmOpenrouter FallbackModel "deepseek/deepseek-chat-v3-0324:free"
 
 
 
