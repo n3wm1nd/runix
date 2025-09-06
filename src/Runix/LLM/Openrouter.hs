@@ -21,12 +21,12 @@ import Polysemy
 import Polysemy.Fail
 import GHC.Generics
 import Data.Aeson
+import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Lazy as TL
 import GHC.Stack (HasCallStack)
 import Runix.HTTP.Effects
 
-data OpenrouterMessage = OpenrouterMessage {role :: String, content :: TL.Text}
+data OpenrouterMessage = OpenrouterMessage {role :: String, content :: Text}
     deriving (Generic, ToJSON, FromJSON)
 data OpenrouterQuery = OpenrouterQuery {model :: String, messages :: [OpenrouterMessage]}
     deriving (Generic, ToJSON, FromJSON)
@@ -85,14 +85,14 @@ llmOpenrouter _model modelidentifier = interpret $ \case
         let historyMessages = map (OpenrouterMessage "assistant") history
         let currentMessages = historyMessages ++ 
                              [OpenrouterMessage "system" instructions, 
-                              OpenrouterMessage "user" (TL.fromStrict inputData)]
+                              OpenrouterMessage "user" inputData]
         resp :: OpenrouterResponse <- post
             (Endpoint "chat/completions")
             OpenrouterQuery { model=modelidentifier, messages=currentMessages}
         case resp.choices of
             c:_ -> do
                 let newHistory = history ++ [c.message.content]
-                return (newHistory, TL.toStrict c.message.content)
+                return (newHistory, c.message.content)
             [] -> fail "openrouter: no choices returned"
 
 openrouterapi :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
