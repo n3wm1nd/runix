@@ -16,6 +16,7 @@
 module Runix.LLM.Openrouter (Openrouter, openrouterapi, llmOpenrouter, OpenrouterKey(OpenrouterKey)) where
 import Runix.Secret.Effects
 import Runix.LLM.Effects
+import Runix.LLM.Protocol.OpenAICompatible
 import Runix.RestAPI.Effects
 import Polysemy
 import Polysemy.Fail
@@ -26,32 +27,7 @@ import qualified Data.Text as T
 import GHC.Stack (HasCallStack)
 import Runix.HTTP.Effects
 
-data OpenrouterMessage = OpenrouterMessage {role :: String, content :: Text}
-    deriving (Generic, ToJSON, FromJSON)
-data OpenrouterQuery = OpenrouterQuery {model :: String, messages :: [OpenrouterMessage]}
-    deriving (Generic, ToJSON, FromJSON)
 newtype OpenrouterKey = OpenrouterKey String
-
-data OpenrouterResponse = OpenrouterResponse {
-    id :: String,
-    model :: String,
-    choices :: [OpenrouterChoice],
-    usage :: OpenrouterUsage
-    }
-    deriving (Generic, ToJSON, FromJSON)
-data OpenrouterUsage = OpenrouterUsage {
-    prompt_tokens :: Int,
-    completion_tokens :: Int,
-    total_tokens :: Int
-}
-    deriving (Generic, ToJSON, FromJSON)
-
-data OpenrouterChoice = OpenrouterChoice {
-    finish_reason :: String,
-    native_finish_reason :: String,
-    message :: OpenrouterMessage
-}
-    deriving (Generic, ToJSON, FromJSON)
 
 
 newtype Openrouter = Openrouter {
@@ -65,34 +41,26 @@ instance RestEndpoint Openrouter where
 llmOpenrouter :: HasCallStack => Members [Fail, HTTP, RestAPI Openrouter] r => model -> String -> Sem (LLM model: r) a -> Sem r a
 llmOpenrouter _model modelidentifier = interpret $ \case
     AskLLM query -> do
-        resp :: OpenrouterResponse <- post
+        resp :: OpenAIResponse <- post
             (Endpoint "chat/completions")
-            OpenrouterQuery { model=modelidentifier, messages=[OpenrouterMessage "user" query]}
+            OpenAIQuery { model=modelidentifier, messages=[OpenAIMessage "user" query], stream=False}
         case resp.choices of
             c:_ -> return c.message.content
             [] -> fail "openrouter: no choices returned"
     
-    QueryLLM (LLMInstructions instructions) inputData -> do
-        let messages = [OpenrouterMessage "system" instructions, OpenrouterMessage "user" inputData]
-        resp :: OpenrouterResponse <- post
-            (Endpoint "chat/completions")
-            OpenrouterQuery { model=modelidentifier, messages=messages}
-        case resp.choices of
-            c:_ -> return c.message.content
-            [] -> fail "openrouter: no choices returned"
-    
-    QueryLLMWithHistory (LLMInstructions instructions) history inputData -> do
-        let historyMessages = map (OpenrouterMessage "assistant") history
+    QueryLLM (LLMInstructions instructions) history inputData -> do
+        let historyMessages = map messageToOpenAI history
         let currentMessages = historyMessages ++ 
-                             [OpenrouterMessage "system" instructions, 
-                              OpenrouterMessage "user" inputData]
-        resp :: OpenrouterResponse <- post
+                             [messageToOpenAI (SystemPrompt instructions), 
+                              messageToOpenAI (UserQuery inputData)]
+        resp :: OpenAIResponse <- post
             (Endpoint "chat/completions")
-            OpenrouterQuery { model=modelidentifier, messages=currentMessages}
+            OpenAIQuery { model=modelidentifier, messages=currentMessages, stream=False}
         case resp.choices of
             c:_ -> do
-                let newHistory = history ++ [c.message.content]
-                return (newHistory, c.message.content)
+                let responseMessage = openAIToMessage c.message
+                let newHistory = history ++ [responseMessage]
+                return (newHistory, responseMessage)
             [] -> fail "openrouter: no choices returned"
 
 openrouterapi :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
