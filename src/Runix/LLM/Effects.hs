@@ -34,5 +34,3 @@ data LLM model (m :: Type -> Type) a where
     QueryLLM :: LLMInstructions -> MessageHistory -> Text -> LLM model m (MessageHistory, Message)
 makeSem ''LLM
 
-class LLMModel model where
-    modelidentifier :: model -> String

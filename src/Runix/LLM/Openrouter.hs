@@ -13,7 +13,14 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
 
-module Runix.LLM.Openrouter (Openrouter, openrouterapi, llmOpenrouter, OpenrouterKey(OpenrouterKey)) where
+module Runix.LLM.Openrouter (
+    Openrouter,
+    openrouterAPI,
+    llmOpenrouter,
+    llmOpenrouterSimple,
+    OpenrouterKey(..),
+    SimpleModel(..)
+) where
 import Runix.Secret.Effects
 import Runix.LLM.Effects
 import Runix.LLM.Protocol.OpenAICompatible
@@ -22,13 +29,21 @@ import Polysemy
 import Polysemy.Fail
 import GHC.Generics
 import Data.Aeson
-import Data.Text (Text)
-import qualified Data.Text as T
 import GHC.Stack (HasCallStack)
 import Runix.HTTP.Effects
 
 newtype OpenrouterKey = OpenrouterKey String
 
+-- Provider-specific typeclass for OpenRouter model lookup
+class OpenrouterModel model where
+    openrouterModelId :: model -> String
+
+-- Simple model type for string identifiers
+newtype SimpleModel = SimpleModel String
+    deriving (Show, Eq, Generic, ToJSON, FromJSON)
+
+instance OpenrouterModel SimpleModel where
+    openrouterModelId (SimpleModel name) = name
 
 newtype Openrouter = Openrouter {
     apikey :: String
@@ -38,12 +53,12 @@ instance RestEndpoint Openrouter where
     apiroot _ = "https://openrouter.ai/api/v1/"
     authheaders a = [("Authorization", "Bearer " <> a.apikey)]
 
-llmOpenrouter :: HasCallStack => Members [Fail, HTTP, RestAPI Openrouter] r => model -> String -> Sem (LLM model: r) a -> Sem r a
-llmOpenrouter _model modelidentifier = interpret $ \case
+llmOpenrouter :: HasCallStack => OpenrouterModel model => Members [Fail, HTTP, RestAPI Openrouter] r => model -> Sem (LLM model: r) a -> Sem r a
+llmOpenrouter model = interpret $ \case
     AskLLM query -> do
         resp :: OpenAIResponse <- post
             (Endpoint "chat/completions")
-            OpenAIQuery { model=modelidentifier, messages=[OpenAIMessage "user" query], stream=False}
+            OpenAIQuery { model=openrouterModelId model, messages=[OpenAIMessage "user" query], stream=False}
         case resp.choices of
             c:_ -> return c.message.content
             [] -> fail "openrouter: no choices returned"
@@ -55,7 +70,7 @@ llmOpenrouter _model modelidentifier = interpret $ \case
                               messageToOpenAI (UserQuery inputData)]
         resp :: OpenAIResponse <- post
             (Endpoint "chat/completions")
-            OpenAIQuery { model=modelidentifier, messages=currentMessages, stream=False}
+            OpenAIQuery { model=openrouterModelId model, messages=currentMessages, stream=False}
         case resp.choices of
             c:_ -> do
                 let responseMessage = openAIToMessage c.message
@@ -63,7 +78,11 @@ llmOpenrouter _model modelidentifier = interpret $ \case
                 return (newHistory, responseMessage)
             [] -> fail "openrouter: no choices returned"
 
-openrouterapi :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
-openrouterapi a = do
+-- Convenience function that takes just a model identifier string
+llmOpenrouterSimple :: HasCallStack => Members [Fail, HTTP, RestAPI Openrouter] r => String -> Sem (LLM SimpleModel: r) a -> Sem r a
+llmOpenrouterSimple modelId = llmOpenrouter (SimpleModel modelId)
+
+openrouterAPI :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI Openrouter:r) a -> Sem (Secret OpenrouterKey:r) a
+openrouterAPI a = do
     OpenrouterKey key <- getSecret
     restapiHTTP (Openrouter { apikey = key }) (raiseUnder a)

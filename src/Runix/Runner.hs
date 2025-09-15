@@ -50,6 +50,7 @@ import Runix.Secret.Effects
 
 
 data FallbackModel = FallbackModel
+data CodingModel = CodingModel
  
 
 -- Engine
@@ -112,9 +113,31 @@ secretEnv gensecret envname = interpret $ \case
             Just key -> pure $ gensecret key
 
 
-openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM FallbackModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
-openrouter = secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" . Openrouter.openrouterapi . Openrouter.llmOpenrouter FallbackModel "deepseek/deepseek-chat-v3-0324:free"
+openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM FallbackModel : LLM Openrouter.SimpleModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
+openrouter =
+  secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" .
+  Openrouter.openrouterAPI .
+  Openrouter.llmOpenrouterSimple "deepseek/deepseek-chat-v3-0324:free" .
+  fallbackModel
 
+-- Universal semantic adapters using Polysemy
+codingModel :: forall model r a. Member (LLM model) r => Sem (LLM CodingModel :  r) a -> Sem r a
+codingModel = interpret $ \case
+    AskLLM query -> askLLM query
+    QueryLLM instructions history inputData -> queryLLM instructions history inputData
+
+fallbackModel :: Member (LLM m) r => Sem (LLM FallbackModel : r) a -> Sem r a
+fallbackModel = interpret $ \case
+    AskLLM query -> askLLM query
+    QueryLLM instructions history inputData -> queryLLM instructions history inputData
+
+-- Test single semantic adapter
+openrouterCoding :: Members [Embed IO, Fail, HTTP] r => Sem (LLM CodingModel : LLM Openrouter.SimpleModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
+openrouterCoding =
+  secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" .
+  Openrouter.openrouterAPI .
+  Openrouter.llmOpenrouterSimple "deepseek/deepseek-chat-v3-0324:free" .
+  codingModel
 
 
 -- Reinterpreter for HTTP with header support

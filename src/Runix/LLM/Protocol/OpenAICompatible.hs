@@ -53,4 +53,4 @@ openAIToMessage (OpenAIMessage "user" content) = UserQuery content
 openAIToMessage (OpenAIMessage "assistant" content) = AssistantResponse (Just content) []
 openAIToMessage (OpenAIMessage "system" content) = SystemPrompt content
 openAIToMessage (OpenAIMessage "tool" content) = ToolCallResult content
-openAIToMessage (OpenAIMessage role content) = error $ "Unknown role: " ++ role
+openAIToMessage (OpenAIMessage role _content) = error $ "Unknown role: " ++ role
