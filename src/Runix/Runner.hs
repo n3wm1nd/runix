@@ -42,16 +42,11 @@ import qualified Data.Text as T
 import Data.String (fromString)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro)
 import GHC.Stack
-import Data.List (intercalate, find, uncons)
-import Data.Aeson (FromJSON, ToJSON, decode, encode, eitherDecode)
-import System.Exit (exitFailure)
-import System.IO (stderr)
-import GHC.IO.Handle (hPutStr)
+import Data.List (intercalate)
 import Runix.Compiler.Effects
 import Runix.LLM.Effects
 import Runix.LLM.Protocol.OpenAICompatible
 import Runix.Secret.Effects
-import GHC.Generics
 
 
 -- Capability marker typeclass
