@@ -67,11 +67,15 @@ library
         Runix.HTTP.Effects,
         Runix.RestAPI.Effects,
         Runix.LLM.Effects,
-        Runix.Compiler.Effects
+        Runix.LLM.OpenAICompatible,
+        Runix.LLM.Protocol.OpenAICompatible,
+        Runix.Compiler.Effects,
+        Runix.Runners.CLI.Single,
+        Runix.Runners.CLI.Multi
 
 
     -- Modules included in this library but not exported.
-    other-modules: Runix.Compiler.Compiler, Runix.Compiler.Cabal, Runix.LLM.Openrouter, Runix.LLM.OpenAI, Runix.LLM.OpenAICompatible, Runix.LLM.Protocol.OpenAICompatible, Runix.LLM.Protocol.Anthropic
+    other-modules: Runix.Compiler.Compiler, Runix.Compiler.Cabal, Runix.LLM.Openrouter, Runix.LLM.OpenAI, Runix.LLM.Protocol.Anthropic
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:

@@ -10,9 +10,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
 
 
-module Runix.Runner (runUntrusted, cliRunner, Task(..), SafeEffects) where
+module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, httpIO, httpIO_, withRequestTimeout, secretEnv, loggingIO, failLog, Coding) where
+
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
 import System.Environment (lookupEnv, getArgs)
@@ -37,7 +40,7 @@ import qualified Control.Monad.Catch as CMC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import Data.String (fromString)
-import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS))
+import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro)
 import GHC.Stack
 import Data.List (intercalate, find, uncons)
 import Data.Aeson (FromJSON, ToJSON, decode, encode, eitherDecode)
@@ -46,15 +49,33 @@ import System.IO (stderr)
 import GHC.IO.Handle (hPutStr)
 import Runix.Compiler.Effects
 import Runix.LLM.Effects
+import Runix.LLM.Protocol.OpenAICompatible
 import Runix.Secret.Effects
+import GHC.Generics
 
 
-data FallbackModel = FallbackModel
-data CodingModel = CodingModel
+-- Capability marker typeclass
+class Coding model
+
+-- Simple placeholder model for demonstrations
+data ModelName = ModelName
+    { name :: String
+    , maxTokens :: Maybe Int
+    , reasoning :: Maybe ReasoningConfig
+    }
+
+instance Openrouter.OpenrouterModel ModelName where
+    openrouterModelId model = model.name
+    openrouterSetParameters model query = query
+        { max_tokens = model.maxTokens
+        , reasoning = model.reasoning
+        }
+
+instance Coding ModelName
  
 
 -- Engine
-type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM FallbackModel]
+type SafeEffects = [FileSystem, HTTP, CompileTask, Logging, LLM ModelName]
 
 filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
 filesystemIO = interpret $ \case
@@ -78,8 +99,8 @@ filesystemIO = interpret $ \case
 
 
 -- HTTP interpreter with header support
-httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
-httpIO = interpret $ \case
+httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => (Request -> Request) -> Sem (HTTP : r) a -> Sem r a
+httpIO requestTransform = interpret $ \case
     HttpRequest request -> do
         parsed <- embed $ CMC.try (parseRequest request.uri)
         req <- case parsed of
@@ -91,6 +112,7 @@ httpIO = interpret $ \case
         let hr :: Request =
                 setRequestMethod (fromString request.method) .
                 setRequestHeaders hdrs .
+                requestTransform .
                 case request.body of
                     Just b -> setRequestBody (RequestBodyLBS b)
                     Nothing -> Prelude.id
@@ -104,6 +126,14 @@ httpIO = interpret $ \case
             , body = getResponseBody resp
             }
 
+-- Convenience function with default behavior (no request transformation)
+httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
+httpIO_ = httpIO Prelude.id
+
+-- Helper function to set request timeout in seconds
+withRequestTimeout :: Int -> Request -> Request
+withRequestTimeout seconds = setRequestResponseTimeout (responseTimeoutMicro (seconds * 1000000))
+
 secretEnv :: Members [Fail, Embed IO] r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
 secretEnv gensecret envname = interpret $ \case
     GetSecret -> do
@@ -113,31 +143,11 @@ secretEnv gensecret envname = interpret $ \case
             Just key -> pure $ gensecret key
 
 
-openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM FallbackModel : LLM Openrouter.SimpleModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
+openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM ModelName : RestAPI Openrouter.Openrouter : r) a -> Sem r a
 openrouter =
   secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" .
   Openrouter.openrouterAPI .
-  Openrouter.llmOpenrouterSimple "deepseek/deepseek-chat-v3-0324:free" .
-  fallbackModel
-
--- Universal semantic adapters using Polysemy
-codingModel :: forall model r a. Member (LLM model) r => Sem (LLM CodingModel :  r) a -> Sem r a
-codingModel = interpret $ \case
-    AskLLM query -> askLLM query
-    QueryLLM instructions history inputData -> queryLLM instructions history inputData
-
-fallbackModel :: Member (LLM m) r => Sem (LLM FallbackModel : r) a -> Sem r a
-fallbackModel = interpret $ \case
-    AskLLM query -> askLLM query
-    QueryLLM instructions history inputData -> queryLLM instructions history inputData
-
--- Test single semantic adapter
-openrouterCoding :: Members [Embed IO, Fail, HTTP] r => Sem (LLM CodingModel : LLM Openrouter.SimpleModel : RestAPI Openrouter.Openrouter : r) a -> Sem r a
-openrouterCoding =
-  secretEnv Openrouter.OpenrouterKey "OPENROUTER_API" .
-  Openrouter.openrouterAPI .
-  Openrouter.llmOpenrouterSimple "deepseek/deepseek-chat-v3-0324:free" .
-  codingModel
+  Openrouter.llmOpenrouter (ModelName "deepseek/deepseek-chat-v3-0324:free" Nothing Nothing)
 
 
 -- Reinterpreter for HTTP with header support
@@ -191,31 +201,5 @@ failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
 failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
 runUntrusted :: HasCallStack => (forall r . Members SafeEffects r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . httpIO . filesystemIO. openrouter .  compileTaskIO
+runUntrusted = runM . runError . loggingIO . failLog . httpIO_ . filesystemIO. openrouter .  compileTaskIO
 
--- Task representation
-data Task where
-  Task :: (FromJSON a, ToJSON b) =>
-    { taskName :: String
-    , taskFunc :: a -> (forall r . Members SafeEffects r => Sem r b)
-    } -> Task
-
--- CLI Runner implementation
-cliRunner :: [Task] -> IO ()
-cliRunner tasks = do
-  result <- runM . runError $ do
-    args <- embed getArgs
-    tName <- note "no taskname given" $ fmap fst (uncons args)
-
-    -- Find the task by name
-    Task _name taskFn <-
-      note ("Error: Task '" <> tName <> "' not found") $
-      find ( (== tName) . taskName) tasks
-
-    input <- embed BL.getContents >>= fromEither . eitherDecode
-
-    output <- embed $ runUntrusted (taskFn input)
-    fromEither $ fmap encode output
-  case result of
-    Right o -> BL.putStr o
-    Left e -> hPutStr stderr e >> exitFailure

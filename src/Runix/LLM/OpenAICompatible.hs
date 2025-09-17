@@ -15,27 +15,26 @@
 module Runix.LLM.OpenAICompatible (
     OpenAICompatible,
     OpenAICompatibleKey(..),
+    OpenAICompatibleModel(..),
     openaiCompatibleAPI,
-    llmOpenAICompatible,
-    ModelName(..)
+    llmOpenAICompatible
 ) where
 
 import Runix.Secret.Effects
 import Runix.LLM.Effects
 import Runix.LLM.Protocol.OpenAICompatible
 import Runix.RestAPI.Effects
+import Runix.Logging.Effects
 import Polysemy
 import Polysemy.Fail
 import GHC.Generics
 import Data.Aeson
+import Data.Text (Text)
+import qualified Data.Text as T
 import GHC.Stack (HasCallStack)
 import Runix.HTTP.Effects
 
 newtype OpenAICompatibleKey = OpenAICompatibleKey String
-
--- Simple newtype wrapper for model name (optional but cleaner)
-newtype ModelName = ModelName String
-    deriving (Show, Eq, Generic, ToJSON, FromJSON)
 
 data OpenAICompatible = OpenAICompatible
     { apikey :: String
@@ -46,24 +45,23 @@ instance RestEndpoint OpenAICompatible where
     apiroot a = a.endpoint
     authheaders a = [("Authorization", "Bearer " <> a.apikey)]
 
-llmOpenAICompatible :: HasCallStack => Members [Fail, HTTP, RestAPI OpenAICompatible] r => String -> Sem (LLM ModelName: r) a -> Sem r a
-llmOpenAICompatible modelId = interpret $ \case
-    AskLLM query -> do
-        resp :: OpenAIResponse <- post
-            (Endpoint "chat/completions")
-            OpenAIQuery { model=modelId, messages=[OpenAIMessage "user" query], stream=False}
-        case resp.choices of
-            c:_ -> return c.message.content
-            [] -> fail "openai-compatible: no choices returned"
+-- Provider-specific typeclass for OpenAI compatible model lookup
+class OpenAICompatibleModel model where
+    openaiCompatibleModelId :: model -> String
+    openaiCompatibleSetParameters :: model -> OpenAIQuery -> OpenAIQuery
 
-    QueryLLM (LLMInstructions instructions) history inputData -> do
+llmOpenAICompatible :: HasCallStack => OpenAICompatibleModel model => Members [Fail, HTTP, RestAPI OpenAICompatible, Logging] r => model -> Sem (LLM model: r) a -> Sem r a
+llmOpenAICompatible model = interpret $ \case
+    QueryLLMWithModel modelModifier (LLMInstructions instructions) history inputData -> do
+        let currentModel = modelModifier model
+        info $ "LLM query: " <> inputData
         let historyMessages = map messageToOpenAI history
         let currentMessages = historyMessages ++
                              [messageToOpenAI (SystemPrompt instructions),
                               messageToOpenAI (UserQuery inputData)]
-        resp :: OpenAIResponse <- post
-            (Endpoint "chat/completions")
-            OpenAIQuery { model=modelId, messages=currentMessages, stream=False}
+        let baseQuery = OpenAIQuery { model=openaiCompatibleModelId currentModel, messages=currentMessages, stream=False, max_tokens=Nothing, reasoning=Nothing}
+        let finalQuery = openaiCompatibleSetParameters currentModel baseQuery
+        resp :: OpenAIResponse <- post (Endpoint "chat/completions") finalQuery
         case resp.choices of
             c:_ -> do
                 let responseMessage = openAIToMessage c.message

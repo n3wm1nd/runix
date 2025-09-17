@@ -3,7 +3,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 
-module Runix.LLM.Protocol.OpenAICompatible where
+module Runix.LLM.Protocol.OpenAICompatible (
+    OpenAIMessage(..),
+    OpenAIQuery(..),
+    ReasoningConfig(..),
+    OpenAIResponse(..),
+    OpenAIUsage(..),
+    OpenAIChoice(..),
+    messageToOpenAI,
+    openAIToMessage
+) where
 
 import GHC.Generics
 import Data.Aeson
@@ -15,10 +24,17 @@ data OpenAIMessage = OpenAIMessage
   , content :: Text
   } deriving (Generic, ToJSON, FromJSON)
 
-data OpenAIQuery = OpenAIQuery 
+data OpenAIQuery = OpenAIQuery
   { model :: String
   , messages :: [OpenAIMessage]
   , stream :: Bool
+  , max_tokens :: Maybe Int
+  , reasoning :: Maybe ReasoningConfig
+  } deriving (Generic, ToJSON, FromJSON)
+
+data ReasoningConfig = ReasoningConfig
+  { max_tokens :: Maybe Int
+  , effort :: Maybe String  -- "low", "medium", "high"
   } deriving (Generic, ToJSON, FromJSON)
 
 data OpenAIResponse = OpenAIResponse 
@@ -34,9 +50,9 @@ data OpenAIUsage = OpenAIUsage
   , total_tokens :: Int
   } deriving (Generic, ToJSON, FromJSON)
 
-data OpenAIChoice = OpenAIChoice 
+data OpenAIChoice = OpenAIChoice
   { finish_reason :: String
-  , native_finish_reason :: String
+  , index :: Int
   , message :: OpenAIMessage
   } deriving (Generic, ToJSON, FromJSON)
 
