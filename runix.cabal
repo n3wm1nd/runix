@@ -71,7 +71,8 @@ library
         Runix.LLM.Protocol.OpenAICompatible,
         Runix.Compiler.Effects,
         Runix.Runners.CLI.Single,
-        Runix.Runners.CLI.Multi
+        Runix.Runners.CLI.Multi,
+        Runix.Runners.CLI.Chat
 
 
     -- Modules included in this library but not exported.

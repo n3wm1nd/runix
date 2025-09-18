@@ -15,10 +15,10 @@ import Data.Kind (Type)
 import Data.Text (Text)
 import Data.Aeson (Value)
 
-data Message 
+data Message
   = SystemPrompt Text
-  | UserQuery Text  
-  | AssistantResponse (Maybe Text) [ToolCall]
+  | UserQuery Text
+  | AssistantResponse (Maybe Text) [ToolCall] (Maybe Text) -- content, tool calls, thinking
   | ToolCallResult Text
   deriving (Show, Eq)
 
@@ -42,7 +42,7 @@ askLLMWith :: Members [LLM model, Fail] r => (model -> model) -> Text -> Sem r T
 askLLMWith modifier query = do
     (_, msg) <- queryLLMWithModel modifier (LLMInstructions mempty) [] query
     case msg of
-        AssistantResponse (Just content) [] -> return content
+        AssistantResponse (Just content) [] _ -> return content
         _ -> fail "Unexpected response format"
 
 queryLLM :: Member (LLM model) r => LLMInstructions -> MessageHistory -> Text -> Sem r (MessageHistory, Message)
