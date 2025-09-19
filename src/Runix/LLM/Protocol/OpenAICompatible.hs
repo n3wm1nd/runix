@@ -10,8 +10,10 @@ module Runix.LLM.Protocol.OpenAICompatible (
     OpenAIResponse(..),
     OpenAIUsage(..),
     OpenAIChoice(..),
-    messageToOpenAI,
-    openAIToMessage,
+    ToolDefinition(..),
+    FunctionDefinition(..),
+    OpenAIToolCall(..),
+    OpenAIFunctionCall(..),
     extractThinking
 ) where
 
@@ -19,19 +21,72 @@ import GHC.Generics
 import Data.Aeson
 import Data.Text (Text)
 import qualified Data.Text as T
-import Runix.LLM.Effects (Message(..))
+import Data.String (fromString)
+import Data.Maybe (catMaybes)
+import qualified Data.ByteString.Lazy.Char8 as L8
+import Runix.LLM.Effects (ToolCall(..))
 
-data OpenAIMessage = OpenAIMessage 
-  { role :: String
-  , content :: Text
+data OpenAIMessage = OpenAIMessage
+  { role :: Text
+  , content :: Maybe Text
+  , tool_calls :: Maybe [OpenAIToolCall]
+  , tool_call_id :: Maybe Text
+  } deriving (Generic, FromJSON)
+
+instance ToJSON OpenAIMessage where
+  toJSON (OpenAIMessage r c tc tcid) = object $ catMaybes
+    [ Just ("role" .= r)
+    , ("content" .=) <$> c
+    , ("tool_calls" .=) <$> tc
+    , ("tool_call_id" .=) <$> tcid
+    ]
+
+data OpenAIToolCall = OpenAIToolCall
+  { toolCallId :: Text
+  , toolCallType :: Text  -- "function"
+  , function :: OpenAIFunctionCall
+  } deriving (Generic)
+
+instance ToJSON OpenAIToolCall where
+  toJSON (OpenAIToolCall tcId tcType f) = object ["id" .= tcId, "type" .= tcType, "function" .= f]
+
+instance FromJSON OpenAIToolCall where
+  parseJSON = withObject "OpenAIToolCall" $ \o -> OpenAIToolCall
+    <$> o .: "id"
+    <*> o .: "type"
+    <*> o .: "function"
+
+data OpenAIFunctionCall = OpenAIFunctionCall
+  { name :: Text
+  , arguments :: Text  -- JSON string
   } deriving (Generic, ToJSON, FromJSON)
 
 data OpenAIQuery = OpenAIQuery
-  { model :: String
+  { model :: Text
   , messages :: [OpenAIMessage]
   , stream :: Bool
   , max_tokens :: Maybe Int
   , reasoning :: Maybe ReasoningConfig
+  , tools :: Maybe [ToolDefinition]
+  } deriving (Generic, ToJSON, FromJSON)
+
+data ToolDefinition = ToolDefinition
+  { toolType :: String  -- "function"
+  , function :: FunctionDefinition
+  } deriving (Generic)
+
+instance ToJSON ToolDefinition where
+  toJSON (ToolDefinition t f) = object ["type" .= t, "function" .= f]
+
+instance FromJSON ToolDefinition where
+  parseJSON = withObject "ToolDefinition" $ \o -> ToolDefinition
+    <$> o .: "type"
+    <*> o .: "function"
+
+data FunctionDefinition = FunctionDefinition
+  { name :: String
+  , description :: String
+  , parameters :: Value
   } deriving (Generic, ToJSON, FromJSON)
 
 data ReasoningConfig = ReasoningConfig
@@ -58,13 +113,6 @@ data OpenAIChoice = OpenAIChoice
   , message :: OpenAIMessage
   } deriving (Generic, ToJSON, FromJSON)
 
-messageToOpenAI :: Message -> OpenAIMessage
-messageToOpenAI (SystemPrompt content) = OpenAIMessage "system" content
-messageToOpenAI (UserQuery content) = OpenAIMessage "user" content
-messageToOpenAI (AssistantResponse (Just content) [] _) = OpenAIMessage "assistant" content
-messageToOpenAI (AssistantResponse Nothing [] _) = OpenAIMessage "assistant" ""
-messageToOpenAI (AssistantResponse _ _ _) = error "Tool calls not yet supported in OpenAI compatible protocol"
-messageToOpenAI (ToolCallResult content) = OpenAIMessage "tool" content
 
 -- Extract thinking content from <think>...</think> tags
 extractThinking :: Text -> (Text, Maybe Text)
@@ -80,12 +128,3 @@ extractThinking input =
                 _ -> (input, Nothing)  -- Malformed tags, return original
         _ -> (input, Nothing)  -- Multiple thinking tags, return original
 
-openAIToMessage :: OpenAIMessage -> Message
-openAIToMessage (OpenAIMessage "user" content) = UserQuery content
-openAIToMessage (OpenAIMessage "assistant" content) =
-    let (cleanContent, thinking) = extractThinking content
-        finalContent = if T.null cleanContent then Nothing else Just cleanContent
-    in AssistantResponse finalContent [] thinking
-openAIToMessage (OpenAIMessage "system" content) = SystemPrompt content
-openAIToMessage (OpenAIMessage "tool" content) = ToolCallResult content
-openAIToMessage (OpenAIMessage role _content) = error $ "Unknown role: " ++ role

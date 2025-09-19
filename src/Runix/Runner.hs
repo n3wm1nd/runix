@@ -60,11 +60,14 @@ data ModelName = ModelName
     }
 
 instance Openrouter.OpenrouterModel ModelName where
-    openrouterModelId model = model.name
+    openrouterModelId model = T.pack model.name
     openrouterSetParameters model query = query
         { max_tokens = model.maxTokens
         , reasoning = model.reasoning
         }
+
+instance HasSystemPrompt ModelName where
+    getSystemPrompt _ = Nothing  -- This model doesn't support system prompts
 
 instance Coding ModelName
  

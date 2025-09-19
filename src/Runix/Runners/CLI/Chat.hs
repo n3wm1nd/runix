@@ -17,7 +17,7 @@ import Polysemy
 import Runix.LLM.Effects
 
 
--- | Interactive chat loop that accumulates message history
+-- | Interactive chat loop that accumulates conversation history
 -- The agent function receives user input and current history, returns updated history
 chatLoop :: Member (Embed IO) r
          => (T.Text -> MessageHistory -> Sem r MessageHistory)
