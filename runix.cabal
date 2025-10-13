@@ -69,6 +69,7 @@ library
         Runix.LLM.Effects,
         Runix.LLM.OpenAICompatible,
         Runix.LLM.Protocol.OpenAICompatible,
+        Runix.LLMTypes,
         Runix.Compiler.Effects,
         Runix.Runners.CLI.Single,
         Runix.Runners.CLI.Multi,
@@ -82,7 +83,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, exceptions
+    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, exceptions, autodocodec, autodocodec-schema
 
     -- Directories containing source files.
     hs-source-dirs:   src

@@ -1,0 +1,30 @@
+cabal-version: 2.4
+name: dndwiki
+version: 1.0.0
+synopsis: dndwiki task for Runix
+description: A Runix task implementation
+author: .newmind
+license: MIT
+
+library
+  exposed-modules: Dndwiki, Wiki
+  build-depends: 
+    base >= 4.14,
+    runix,
+    polysemy,
+    text,
+    aeson,
+    time,
+    bytestring,
+    filepath,
+  hs-source-dirs: src
+  default-language: Haskell2010
+  ghc-options: -Wall
+  default-extensions:
+    DeriveGeneric,
+    DeriveAnyClass,
+    OverloadedStrings,
+    GADTs,
+    DataKinds,
+    TypeOperators,
+    FlexibleContexts
