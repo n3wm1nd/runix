@@ -15,13 +15,14 @@ import qualified Data.Text.IO as T
 
 import Polysemy
 import Runix.LLM.Effects
+import UniversalLLM (Message)
 
 
 -- | Interactive chat loop that accumulates conversation history
 -- The agent function receives user input and current history, returns updated history
 chatLoop :: Member (Embed IO) r
-         => (T.Text -> MessageHistory -> Sem r MessageHistory)
-         -> MessageHistory
+         => (T.Text -> [Message model provider] -> Sem r [Message model provider])
+         -> [Message model provider]
          -> Sem r ()
 chatLoop agentFunc history = do
     -- Show prompt first

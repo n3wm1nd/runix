@@ -16,6 +16,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.List (find, uncons)
 
 import Runix.Runner (runUntrusted, SafeEffects)
+import Runix.LLM.OpenRouter (OpenRouter, OpenRouterModel)
 import Polysemy
 import Polysemy.Error
 
@@ -23,7 +24,7 @@ import Polysemy.Error
 data Task where
   Task :: (FromJSON a, ToJSON b) =>
     { taskName :: String
-    , taskFunc :: a -> (forall r . Members SafeEffects r => Sem r b)
+    , taskFunc :: a -> (forall r . Members (SafeEffects OpenRouter OpenRouterModel) r => Sem r b)
     } -> Task
 
 -- | CLI Runner for multiple tasks - user selects task by command line argument

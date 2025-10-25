@@ -142,7 +142,7 @@ getLLMGuidance :: forall a. HasLLMCodec a => Text
 getLLMGuidance = llmGuidance @a
 
 -- Core LLM functions using the new approach
-createFrom :: forall model a b r. (HasLLMCodec a, HasLLMCodec b, Members [LLM model, Fail] r) => Text -> b -> Sem r a
+createFrom :: forall provider model a b r. (HasLLMCodec a, HasLLMCodec b, Members '[LLM provider model, Fail] r) => Text -> b -> Sem r a
 createFrom userPrompt input = do
     let augmentedPrompt = userPrompt <> "\nCreate " <> getLLMDescription @a <> " in " <> getFormatType (llmFormat @a) <> " format from the provided " <> getLLMDescription @b <> ". " <> getLLMGuidance @a
     let inputData = toLLMRepresentation input
@@ -152,7 +152,7 @@ createFrom userPrompt input = do
         Right value -> return value
         Left err -> fail $ "Failed to parse LLM response: " <> err
 
-updateWith :: forall model a b r. (HasLLMCodec a, HasLLMCodec b, Members [LLM model, Fail] r) => Text -> a -> b -> Sem r a
+updateWith :: forall provider model a b r. (HasLLMCodec a, HasLLMCodec b, Members '[LLM provider model, Fail] r) => Text -> a -> b -> Sem r a
 updateWith userPrompt existing input = do
     let augmentedPrompt = userPrompt <> "\nUpdate " <> getLLMDescription @a <> " in " <> getFormatType (llmFormat @a) <> " format using the provided " <> getLLMDescription @b <> ". " <> getLLMGuidance @a
     let combinedInput = augmentedPrompt <> "\n\nExisting content:\n" <> toLLMRepresentation existing <> "\n\nNew information:\n" <> toLLMRepresentation input
@@ -161,7 +161,7 @@ updateWith userPrompt existing input = do
         Right value -> return value
         Left err -> fail $ "Failed to parse LLM response: " <> err
 
-createPrompt :: forall model a r. (HasLLMCodec a, Members [LLM model, Fail] r) => Text -> Sem r a
+createPrompt :: forall provider model a r. (HasLLMCodec a, Members '[LLM provider model, Fail] r) => Text -> Sem r a
 createPrompt userPrompt = do
     let augmentedPrompt = userPrompt <> "\nCreate " <> getLLMDescription @a <> " in " <> getFormatType (llmFormat @a) <> " format. " <> getLLMGuidance @a
     result <- askLLM augmentedPrompt
@@ -170,7 +170,7 @@ createPrompt userPrompt = do
         Left err -> fail $ "Failed to parse LLM response: " <> err
 
 -- | Generate structured output using LLM API schema enforcement
-createStructured :: forall model a r. (HasLLMCodec a, HasCodec a, Members [LLM model, Fail] r) => Text -> Sem r a
+createStructured :: forall provider model a r. (HasLLMCodec a, HasCodec a, Members '[LLM provider model, Fail] r) => Text -> Sem r a
 createStructured userPrompt = do
     let format = llmFormat @a
     case format of

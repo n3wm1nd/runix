@@ -71,7 +71,9 @@ instance HasLLMCodec SessionName where
   llmFormat = textFormat "plain text"
 
 
-data DefaultModel = forall m . DefaultModel m
+-- Existential types to keep functions polymorphic over provider and model
+data DefaultProvider = forall provider. DefaultProvider provider
+data DefaultModel = forall model. DefaultModel model
 
 {- | Turn your D&D session recordings into an organized wiki
 
@@ -103,7 +105,7 @@ was that NPC again?"
 @param sessionName Name/identifier for this session (e.g. "Session 12")
 @return SessionSummary of the processed session
 -}
-ingestTranscript :: Members '[Wiki, LLM DefaultModel, Fail] r =>
+ingestTranscript :: Members '[Wiki, LLM DefaultProvider DefaultModel, Fail] r =>
   RawTranscript -> SessionName -> Sem r SessionSummary
 ingestTranscript rawTranscript sessionName = do
   -- Load world summary (used for both LLM context and session summary generation)
@@ -128,7 +130,7 @@ ingestTranscript rawTranscript sessionName = do
         , ""
         , "=== RECENT SESSIONS ==="
         ] ++ recentSessions
-  _ <- askLLM @DefaultModel ("You are helping maintain a D&D campaign wiki. Here is the current world state:\n" <> wikiContext)
+  _ <- askLLM @DefaultProvider @DefaultModel ("You are helping maintain a D&D campaign wiki. Here is the current world state:\n" <> wikiContext)
   
   -- Process transcript through the pipeline (each function handles its own I/O)
   processedTranscript <- filterTranscript rawTranscript
@@ -151,9 +153,9 @@ ingestTranscript rawTranscript sessionName = do
   return sessionSummary
 
 -- | Filter raw transcript to remove off-table chatter
-filterTranscript :: Members '[Wiki, LLM DefaultModel, Fail] r =>
+filterTranscript :: Members '[Wiki, LLM DefaultProvider DefaultModel, Fail] r =>
   RawTranscript -> Sem r ProcessedTranscript
-filterTranscript rawTranscript = createFrom @DefaultModel filterPrompt rawTranscript
+filterTranscript rawTranscript = createFrom @DefaultProvider @DefaultModel filterPrompt rawTranscript
   where
     filterPrompt = "Filter this D&D session transcript to remove off-table content. " <>
                    "REMOVE: technical issues, real-life conversations, ads, unrelated chatter. " <>
@@ -161,7 +163,7 @@ filterTranscript rawTranscript = createFrom @DefaultModel filterPrompt rawTransc
                    "Preserve timestamps and speaker identification where present."
 
 -- | Create or update session journal (intelligently merges with existing content)
-createSessionJournal :: Members '[Wiki, LLM DefaultModel, Fail] r =>
+createSessionJournal :: Members '[Wiki, LLM DefaultProvider DefaultModel, Fail] r =>
   SessionName -> ProcessedTranscript -> Sem r SessionJournal
 createSessionJournal (SessionName sessionName) processedTranscript = do
   let pageName = PageName ("Session " <> sessionName)
@@ -171,10 +173,10 @@ createSessionJournal (SessionName sessionName) processedTranscript = do
     then do
       -- Update existing journal - LLM will intelligently merge/dedupe content
       existingJournal <- SessionJournal <$> readPage pageName
-      updateWith @DefaultModel updateJournalPrompt existingJournal processedTranscript
+      updateWith @DefaultProvider @DefaultModel updateJournalPrompt existingJournal processedTranscript
     else do
       -- Create new journal
-      createFrom @DefaultModel createJournalPrompt processedTranscript
+      createFrom @DefaultProvider @DefaultModel createJournalPrompt processedTranscript
   
   -- Write updated journal back to wiki
   let SessionJournal journalContent = sessionJournal
@@ -194,7 +196,7 @@ createSessionJournal (SessionName sessionName) processedTranscript = do
                          "Include combat encounters, story developments, character interactions, and add brief context for important events."
 
 -- | Generate session summary from world context and journal (pure transformation)
-generateSessionSummary :: Members '[LLM DefaultModel, Fail] r =>
+generateSessionSummary :: Members '[LLM DefaultProvider DefaultModel, Fail] r =>
   WorldSummary -> SessionJournal -> Sem r SessionSummary
 generateSessionSummary worldSummary sessionJournal = do
   -- Combine world context and journal into a single input
@@ -208,7 +210,7 @@ generateSessionSummary worldSummary sessionJournal = do
         , journalContent
         ]
 
-  askLLM @DefaultModel (summaryPrompt <> "\n\n" <> combinedInput) >>= return . SessionSummary
+  askLLM @DefaultProvider @DefaultModel (summaryPrompt <> "\n\n" <> combinedInput) >>= return . SessionSummary
   where
     summaryPrompt =
       "Create a concise summary of this D&D session journal, considering the world context provided. " <>
@@ -219,12 +221,12 @@ generateSessionSummary worldSummary sessionJournal = do
 
 
 -- | Update entities (read existing, process, write updated)
-updateEntitiesFromSession :: Members '[Wiki, LLM DefaultModel, Fail] r =>
+updateEntitiesFromSession :: Members '[Wiki, LLM DefaultProvider DefaultModel, Fail] r =>
   SessionJournal -> Sem r ()
 updateEntitiesFromSession sessionJournal = do
   -- First, extract entities from the journal using a simple prompt
   let SessionJournal journalContent = sessionJournal
-  entityListText <- askLLM @DefaultModel (extractEntitiesPrompt <> "\n\n" <> journalContent)
+  entityListText <- askLLM @DefaultProvider @DefaultModel (extractEntitiesPrompt <> "\n\n" <> journalContent)
   
   let entityNames = map (EntityName . T.strip) . filter (not . T.null) . T.lines $ entityListText
   
@@ -244,7 +246,7 @@ updateEntitiesFromSession sessionJournal = do
                          "Include appropriate tags (#character #npc #location #item #organization), " <>
                          "brief description, relationships, and any relevant details mentioned in the session."
     
-    processEntity :: Members [Wiki, LLM DefaultModel, Fail] r => EntityName -> Sem r ()
+    processEntity :: Members [Wiki, LLM DefaultProvider DefaultModel, Fail] r => EntityName -> Sem r ()
     processEntity (EntityName name)
       | T.null (T.strip name) = return ()
       | otherwise = do
@@ -255,17 +257,17 @@ updateEntitiesFromSession sessionJournal = do
             then do
               -- Update existing entity
               existingContent <- EntityContent <$> readPage pageName
-              updatedEntity <- updateWith @DefaultModel updateEntityPrompt existingContent sessionJournal
+              updatedEntity <- updateWith @DefaultProvider @DefaultModel updateEntityPrompt existingContent sessionJournal
               let EntityContent updatedContent = updatedEntity
               writePage pageName updatedContent
             else do
               -- Create new entity
-              newEntity <- createFrom @DefaultModel createEntityPrompt sessionJournal
+              newEntity <- createFrom @DefaultProvider @DefaultModel createEntityPrompt sessionJournal
               let EntityContent newContent = newEntity
               writePage pageName newContent
 
 -- | Update world summary (read existing, update, write back)
-updateWorldSummary :: Members '[Wiki, LLM DefaultModel, Fail] r =>
+updateWorldSummary :: Members '[Wiki, LLM DefaultProvider DefaultModel, Fail] r =>
   SessionSummary -> Sem r ()
 updateWorldSummary sessionSummary = do
   -- Check if world summary exists
@@ -276,7 +278,7 @@ updateWorldSummary sessionSummary = do
     then do
       -- Update existing world summary
       existingSummary <- WorldSummary <$> readPage worldSummaryPage
-      updatedSummary <- updateWith @DefaultModel updateWorldPrompt existingSummary sessionSummary
+      updatedSummary <- updateWith @DefaultProvider @DefaultModel updateWorldPrompt existingSummary sessionSummary
       
       -- Only write if content actually changed
       let WorldSummary updatedContent = updatedSummary
@@ -285,7 +287,7 @@ updateWorldSummary sessionSummary = do
         writePage worldSummaryPage updatedContent
     else do
       -- Create new world summary
-      newSummary <- createFrom @DefaultModel createWorldPrompt sessionSummary
+      newSummary <- createFrom @DefaultProvider @DefaultModel createWorldPrompt sessionSummary
       let WorldSummary newContent = newSummary
       writePage worldSummaryPage newContent
   where

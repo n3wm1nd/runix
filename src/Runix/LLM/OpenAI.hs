@@ -1,103 +1,127 @@
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module Runix.LLM.OpenAI (
-    OpenAI,
-    OpenAIKey(..),
-    openaiAPI,
-    llmOpenAI,
-    OpenAIModel(..)
-) where
+module Runix.LLM.OpenAI
+  ( -- * Provider
+    OpenAI
+  , openAIConfig
+  , interpretOpenAI
+    -- * Models
+  , GPT4o(..)
+  , GPT4oMini(..)
+  , O1Preview(..)
+  , O1Mini(..)
+    -- * Re-exports from universal-llm
+  , module UniversalLLM.Providers.OpenAI
+  ) where
 
-import Runix.Secret.Effects
-import Runix.LLM.Effects
-import Runix.LLM.Protocol.OpenAICompatible
-import Runix.LLM.OpenAIUtils
-import Runix.RestAPI.Effects
 import Polysemy
 import Polysemy.Fail
-import GHC.Generics
-import Data.Aeson
 import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Maybe (fromMaybe)
-import GHC.Stack (HasCallStack)
-import Runix.HTTP.Effects
+import qualified Data.Aeson as Aeson
 
-newtype OpenAIKey = OpenAIKey String
+import UniversalLLM.Core.Types
+import UniversalLLM.Providers.OpenAI
+import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
 
--- Provider-specific typeclass for OpenAI model lookup
-class OpenAIModel model where
-    openaiModelId :: model -> Text
-    openaiSetParameters :: model -> OpenAIQuery -> OpenAIQuery
+import Runix.LLM.Effects (LLM)
+import Runix.LLM.Interpreter (LLMConfig(..), interpretLLM)
+import Runix.HTTP.Effects (HTTP)
 
-
-newtype OpenAI = OpenAI
-    { apikey :: String
+-- Convenience constructor for OpenAI config
+openAIConfig :: String -> LLMConfig OpenAI
+openAIConfig apiKey = LLMConfig
+    { llmProvider = OpenAI
+    , llmEndpoint = "https://api.openai.com/v1/chat/completions"
+    , llmHeaders = [("Authorization", "Bearer " <> apiKey), ("Content-Type", "application/json")]
     }
 
-instance RestEndpoint OpenAI where
-    apiroot _ = "https://api.openai.com/v1/"
-    authheaders a = [("Authorization", "Bearer " <> a.apikey)]
+-- Convenience interpreter for OpenAI
+interpretOpenAI :: forall model r a.
+                   ( ProviderImplementation OpenAI model
+                   , ModelName OpenAI model
+                   , Members '[HTTP, Fail] r
+                   )
+                => LLMConfig OpenAI
+                -> model
+                -> Sem (LLM OpenAI model : r) a
+                -> Sem r a
+interpretOpenAI = interpretLLM
 
-llmOpenAI :: HasCallStack => (OpenAIModel model, HasSystemPrompt model) => Members [Fail, HTTP, RestAPI OpenAI] r => model -> Sem (LLM model: r) a -> Sem r a
-llmOpenAI defaultModel = interpret $ \case
-    GetModel -> return defaultModel
-    QueryLLM model history userInput -> do
-        -- Normalize history and convert to OpenAI format
-        let normalized = normalizeOpenAIMessages history
-        let historyMessages = concatMap messageToOpenAI normalized
+-- ============================================================================
+-- Common OpenAI Models
+-- ============================================================================
 
-        -- Add system prompt if available
-        let systemMessage = case getSystemPrompt model of
-                Just prompt -> [OpenAIMessage "system" (Just prompt) Nothing Nothing]
-                Nothing -> []
+-- GPT-4o - Latest flagship model with vision, tools, and reasoning
+data GPT4o = GPT4o deriving (Show, Eq)
 
-        -- Add current user input
-        let userMessages = case userInput of
-                UserQuery text -> [OpenAIMessage "user" (Just text) Nothing Nothing]
-                ToolCallResults results -> toolResultsToOpenAI results
-        let allMessages = systemMessage ++ historyMessages ++ userMessages
+instance ModelName OpenAI GPT4o where
+  modelName _ = "gpt-4o"
 
-        let baseQuery = OpenAIQuery
-                { model = openaiModelId model
-                , messages = allMessages
-                , stream = False
-                , max_tokens = Nothing
-                , reasoning = Nothing
-                , tools = Nothing
-                }
-        let finalQuery = openaiSetParameters model baseQuery
-        resp :: OpenAIResponse <- post (Endpoint "chat/completions") finalQuery
+instance HasTools GPT4o OpenAI where
+  toolsComposableProvider = UniversalLLM.Providers.OpenAI.toolsComposableProvider
 
-        case resp.choices of
-            c:_ -> do
-                let response = c.message
+instance HasJSON GPT4o OpenAI where
+  jsonComposableProvider = UniversalLLM.Providers.OpenAI.jsonComposableProvider
 
-                -- Parse tool calls from response
-                let toolCalls = maybe [] (map openAIToToolCall) (tool_calls response)
+instance HasReasoning GPT4o OpenAI where
+  reasoningComposableProvider = UniversalLLM.Providers.OpenAI.reasoningComposableProvider
 
-                -- Create response message
-                let responseText = fromMaybe "" (response.content)
-                let assistantOutput = AssistantResponse responseText toolCalls
-                let newHistory = history ++ [UserMessage userInput, AssistantMessage assistantOutput]
+instance ProviderImplementation OpenAI GPT4o where
+  getComposableProvider =
+    UniversalLLM.Providers.OpenAI.baseComposableProvider
+    <> UniversalLLM.Providers.OpenAI.toolsComposableProvider
+    <> UniversalLLM.Providers.OpenAI.jsonComposableProvider
+    <> UniversalLLM.Providers.OpenAI.reasoningComposableProvider
 
-                return (newHistory, assistantOutput)
-            [] -> fail "openai: no choices returned"
+-- GPT-4o Mini - Smaller, faster, cheaper variant
+data GPT4oMini = GPT4oMini deriving (Show, Eq)
 
+instance ModelName OpenAI GPT4oMini where
+  modelName _ = "gpt-4o-mini"
 
-openaiAPI :: HasCallStack => Members [Fail, HTTP] r => Sem (RestAPI OpenAI:r) a -> Sem (Secret OpenAIKey:r) a
-openaiAPI a = do
-    OpenAIKey key <- getSecret
-    restapiHTTP (OpenAI { apikey = key }) (raiseUnder a)
+instance HasTools GPT4oMini OpenAI where
+  toolsComposableProvider = UniversalLLM.Providers.OpenAI.toolsComposableProvider
+
+instance HasJSON GPT4oMini OpenAI where
+  jsonComposableProvider = UniversalLLM.Providers.OpenAI.jsonComposableProvider
+
+instance ProviderImplementation OpenAI GPT4oMini where
+  getComposableProvider =
+    UniversalLLM.Providers.OpenAI.baseComposableProvider
+    <> UniversalLLM.Providers.OpenAI.toolsComposableProvider
+    <> UniversalLLM.Providers.OpenAI.jsonComposableProvider
+
+-- O1 Preview - Reasoning model (no tool support yet)
+data O1Preview = O1Preview deriving (Show, Eq)
+
+instance ModelName OpenAI O1Preview where
+  modelName _ = "o1-preview"
+
+instance HasReasoning O1Preview OpenAI where
+  reasoningComposableProvider = UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+
+instance ProviderImplementation OpenAI O1Preview where
+  getComposableProvider =
+    UniversalLLM.Providers.OpenAI.baseComposableProvider
+    <> UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+
+-- O1 Mini - Smaller reasoning model
+data O1Mini = O1Mini deriving (Show, Eq)
+
+instance ModelName OpenAI O1Mini where
+  modelName _ = "o1-mini"
+
+instance HasReasoning O1Mini OpenAI where
+  reasoningComposableProvider = UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+
+instance ProviderImplementation OpenAI O1Mini where
+  getComposableProvider =
+    UniversalLLM.Providers.OpenAI.baseComposableProvider
+    <> UniversalLLM.Providers.OpenAI.reasoningComposableProvider

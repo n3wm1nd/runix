@@ -7,55 +7,75 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Runix.LLM.Effects where
+
 import Polysemy
 import Polysemy.Fail
 import Data.Kind (Type)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Aeson (Value)
 
--- What can be sent TO the LLM
-data UserInput
-  = UserQuery Text
-  | ToolCallResults [ToolResult]
-  deriving (Show, Eq)
+-- Re-export universal-llm types directly
+import UniversalLLM
+  ( Message(..)
+  , ModelConfig(..)
+  , ToolCall
+  , ToolResult
+  , ToolDefinition
+  , LLMTool(..)
+  , Tool(..)
+  , llmToolToDefinition
+  , executeToolCall
+  , HasTools
+  , HasVision
+  , HasJSON
+  , HasReasoning
+  , ProviderImplementation
+  )
 
--- What comes back FROM the LLM
-data AssistantOutput
-  = AssistantResponse Text [ToolCall]  -- Raw text + any tool calls
-  deriving (Show, Eq)
+-- The LLM effect now works directly with universal-llm messages
+-- History management is MANUAL - just append and pass around
+data LLM provider model (m :: Type -> Type) a where
+    GetModel :: LLM provider model m model
+    QueryLLM :: [ModelConfig provider model]       -- Temperature, MaxTokens, Tools, etc.
+             -> [Message model provider]            -- History (append manually)
+             -> LLM provider model m [Message model provider]  -- Response messages
 
--- Internal message representation for history
-data Message
-  = UserMessage UserInput
-  | AssistantMessage AssistantOutput
-  deriving (Show, Eq)
-
-data ToolCall = ToolCall
-  { toolName :: Text
-  , toolId :: Text
-  , parameters :: Value
-  } deriving (Show, Eq)
-
-data ToolResult = ToolResult
-  { toolResultContent :: Text
-  , toolCallId :: Text
-  } deriving (Show, Eq)
-
-type MessageHistory = [Message]
-
--- Typeclass for models that can provide system instructions
-class HasSystemPrompt model where
-  getSystemPrompt :: model -> Maybe Text
-
-data LLM model (m :: Type -> Type) a where
-    GetModel :: LLM model m model
-    QueryLLM :: model -> MessageHistory -> UserInput -> LLM model m (MessageHistory, AssistantOutput)
 makeSem ''LLM
 
--- Pure function to extract thinking from response text
+-- Convenience functions for simple queries
+askLLM :: Members '[LLM provider model, Fail] r => Text -> Sem r Text
+askLLM query = do
+    response <- queryLLM [] [UserText query]  -- No history, simple query
+    case [t | AssistantText t <- response] of
+        [text] -> return text
+        _ -> fail "Expected single text response"
+
+-- Get response with reasoning/thinking
+askLLMWithReasoning :: (Members '[LLM provider model, Fail] r, HasReasoning model provider)
+                    => Text -> Sem r (Text, Maybe Text)
+askLLMWithReasoning query = do
+    response <- queryLLM [Reasoning True] [UserText query]
+    let text = [t | AssistantText t <- response]
+    let reasoning = [r | AssistantReasoning r <- response]
+    return (mconcat text, listToMaybe reasoning)
+  where
+    listToMaybe [] = Nothing
+    listToMaybe (x:_) = Just x
+
+-- Continue conversation - manual history management
+continueConversation :: Member (LLM provider model) r
+                     => [ModelConfig provider model]
+                     -> [Message model provider]  -- YOU manage this
+                     -> Message model provider     -- New message
+                     -> Sem r [Message model provider]
+continueConversation configs history newMsg = do
+    queryLLM configs (history ++ [newMsg])
+
+-- Pure function to extract thinking from response text (for backward compatibility)
+-- This is now deprecated in favor of using AssistantReasoning messages directly
 extractThinking :: Text -> (Text, Maybe Text)
 extractThinking input =
     case T.splitOn (T.pack "<think>") input of
@@ -69,25 +89,10 @@ extractThinking input =
                 _ -> (input, Nothing)  -- Malformed tags, return original
         _ -> (input, Nothing)  -- Multiple thinking tags, return original
 
--- Convenience functions for simple queries
-askLLM :: Members [LLM model, Fail] r => Text -> Sem r Text
-askLLM query = do
-    model <- getModel
-    (_, AssistantResponse rawText []) <- queryLLM model [] (UserQuery query)
-    let (cleanText, _) = extractThinking rawText
-    return cleanText
-
--- Get response with thinking content
-askLLMWithThinking :: Members [LLM model, Fail] r => Text -> Sem r (Text, Maybe Text)
+-- Legacy compatibility: Get response with thinking content (using text extraction)
+askLLMWithThinking :: Members '[LLM provider model, Fail] r => Text -> Sem r (Text, Maybe Text)
 askLLMWithThinking query = do
-    model <- getModel
-    (_, AssistantResponse rawText []) <- queryLLM model [] (UserQuery query)
-    return $ extractThinking rawText
-
--- Query with conversation context
-continueConversation :: Member (LLM model) r => MessageHistory -> UserInput -> Sem r (MessageHistory, AssistantOutput)
-continueConversation history userInput = do
-    model <- getModel
-    queryLLM model history userInput
-
-
+    response <- queryLLM [] [UserText query]
+    case [t | AssistantText t <- response] of
+        [text] -> return $ extractThinking text
+        _ -> fail "Expected single text response"
