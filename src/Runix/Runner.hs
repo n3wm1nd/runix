@@ -18,7 +18,7 @@ module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, httpIO, httpIO_, w
 
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
-import System.Environment (lookupEnv, getArgs)
+import System.Environment (lookupEnv)
 import qualified System.Directory
 
 -- Polysemy libraries
@@ -30,7 +30,6 @@ import Polysemy.Error
 import Runix.FileSystem.Effects
 import Runix.HTTP.Effects
 import Runix.Logging.Effects
-import Runix.RestAPI.Effects
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.OpenRouter (OpenRouter, OpenRouterModel(..), openRouterConfig, interpretOpenRouter)
 
@@ -132,8 +131,9 @@ openrouter action = do
 
 
 -- Reinterpreter for HTTP with header support
-withHeaders :: Members [Fail, Logging, HTTP] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
-withHeaders modifyRequest = intercept $ \case
+-- NOTE: Currently unused, but kept for future use
+_withHeaders :: Members [Fail, Logging, HTTP] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
+_withHeaders modifyRequest = intercept $ \case
     HttpRequest request -> do
         info "intercepted request"
         httpRequest (modifyRequest request)
@@ -172,8 +172,9 @@ loggingIO = interpret $ \v -> do
         funname (_:f:frames) = (intercalate "." . reverse . map fst) (f:frames) <> ": "
         funname _ = ""
 
-loggingNull :: Sem (Logging : r) a -> Sem r a
-loggingNull = interpret $ \case
+-- NOTE: Currently unused, but kept for future use
+_loggingNull :: Sem (Logging : r) a -> Sem r a
+_loggingNull = interpret $ \case
     Info _ _ -> pure ()
     Warning _ _ -> pure ()
     Error _ _ -> pure ()

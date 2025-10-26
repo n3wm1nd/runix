@@ -9,8 +9,7 @@
 
 module Runix.LLM.OpenAI
   ( -- * Provider
-    OpenAI
-  , openAIConfig
+    openAIConfig
   , interpretOpenAI
     -- * Models
   , GPT4o(..)
@@ -23,12 +22,9 @@ module Runix.LLM.OpenAI
 
 import Polysemy
 import Polysemy.Fail
-import Data.Text (Text)
-import qualified Data.Aeson as Aeson
 
 import UniversalLLM.Core.Types
 import UniversalLLM.Providers.OpenAI
-import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
 
 import Runix.LLM.Effects (LLM)
 import Runix.LLM.Interpreter (LLMConfig(..), interpretLLM)

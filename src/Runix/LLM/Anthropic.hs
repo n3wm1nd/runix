@@ -9,8 +9,7 @@
 
 module Runix.LLM.Anthropic
   ( -- * Provider
-    Anthropic
-  , anthropicConfig
+    anthropicConfig
   , interpretAnthropic
     -- * Models
   , ClaudeSonnet4_5(..)
@@ -22,12 +21,9 @@ module Runix.LLM.Anthropic
 
 import Polysemy
 import Polysemy.Fail
-import Data.Text (Text)
-import qualified Data.Aeson as Aeson
 
 import UniversalLLM.Core.Types
 import UniversalLLM.Providers.Anthropic
-import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse)
 
 import Runix.LLM.Effects (LLM)
 import Runix.LLM.Interpreter (LLMConfig(..), interpretLLM)

@@ -14,7 +14,6 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as T
 
 import Polysemy
-import Runix.LLM.Effects
 import UniversalLLM (Message)
 
 

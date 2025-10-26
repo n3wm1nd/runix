@@ -13,7 +13,6 @@ module Runix.LLM.Interpreter where
 import Polysemy
 import Polysemy.Fail
 import qualified Data.Text as T
-import Data.Text (Text)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Aeson as Aeson
 import qualified Data.Text.Encoding as TE
@@ -22,9 +21,7 @@ import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson.Types (parseEither)
 
 import UniversalLLM
-  ( Message(..)
-  , ModelConfig(..)
-  , Provider(..)
+  ( Provider(..)
   , ProviderImplementation(..)
   , toProviderRequest
   , fromProviderResponse
@@ -92,6 +89,6 @@ retryWithBackoff maxRetries action = go maxRetries
   where
     go :: Int -> Sem r a
     go 0 = fail "Max retries exceeded"
-    go n = action  -- TODO: Add proper retry logic with exception catching
+    go _n = action  -- TODO: Add proper retry logic with exception catching
         -- For now, just attempt once. Full retry logic requires exception handling
         -- which we can add when we integrate with the exception effect

@@ -19,13 +19,10 @@ module Runix.LLM.OpenRouter
 import Polysemy
 import Polysemy.Fail
 import Data.Text (Text)
-import qualified Data.Text as T
-import Control.Applicative ((<|>))
 
 import UniversalLLM.Core.Types
 import UniversalLLM.Providers.OpenAI (OpenRouter(..))
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
-import UniversalLLM.Protocols.OpenAI
 
 import Runix.LLM.Effects (LLM)
 import Runix.LLM.Interpreter (LLMConfig(..), interpretLLM)
