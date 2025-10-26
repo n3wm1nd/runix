@@ -65,9 +65,8 @@ instance ModelName OpenRouter OpenRouterModel where
   modelName m = modelId m
 
 -- OpenRouter uses the exact same protocol as OpenAI
--- TODO: universal-llm needs to export OpenRouter-specific composable providers
--- For now, we only support basic text (no tools/JSON) since the providers are typed for OpenAI
+-- We use the OpenAI base provider since they share the same protocol
 
--- Basic text-only implementation for now
+-- Basic text-only implementation (uses OpenAI base provider)
 instance ProviderImplementation OpenRouter OpenRouterModel where
-  getComposableProvider = mempty  -- Will need universal-llm support for full features
+  getComposableProvider = OpenAI.baseComposableProvider

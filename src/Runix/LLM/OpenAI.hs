@@ -65,20 +65,16 @@ instance ModelName OpenAI GPT4o where
   modelName _ = "gpt-4o"
 
 instance HasTools GPT4o OpenAI where
-  toolsComposableProvider = UniversalLLM.Providers.OpenAI.toolsComposableProvider
+  withTools = UniversalLLM.Providers.OpenAI.openAIWithTools
 
 instance HasJSON GPT4o OpenAI where
-  jsonComposableProvider = UniversalLLM.Providers.OpenAI.jsonComposableProvider
+  withJSON = UniversalLLM.Providers.OpenAI.openAIWithJSON
 
 instance HasReasoning GPT4o OpenAI where
-  reasoningComposableProvider = UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+  withReasoning = UniversalLLM.Providers.OpenAI.openAIWithReasoning
 
 instance ProviderImplementation OpenAI GPT4o where
-  getComposableProvider =
-    UniversalLLM.Providers.OpenAI.baseComposableProvider
-    <> UniversalLLM.Providers.OpenAI.toolsComposableProvider
-    <> UniversalLLM.Providers.OpenAI.jsonComposableProvider
-    <> UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+  getComposableProvider = withReasoning . withJSON . withTools $ UniversalLLM.Providers.OpenAI.baseComposableProvider
 
 -- GPT-4o Mini - Smaller, faster, cheaper variant
 data GPT4oMini = GPT4oMini deriving (Show, Eq)
@@ -87,16 +83,13 @@ instance ModelName OpenAI GPT4oMini where
   modelName _ = "gpt-4o-mini"
 
 instance HasTools GPT4oMini OpenAI where
-  toolsComposableProvider = UniversalLLM.Providers.OpenAI.toolsComposableProvider
+  withTools = UniversalLLM.Providers.OpenAI.openAIWithTools
 
 instance HasJSON GPT4oMini OpenAI where
-  jsonComposableProvider = UniversalLLM.Providers.OpenAI.jsonComposableProvider
+  withJSON = UniversalLLM.Providers.OpenAI.openAIWithJSON
 
 instance ProviderImplementation OpenAI GPT4oMini where
-  getComposableProvider =
-    UniversalLLM.Providers.OpenAI.baseComposableProvider
-    <> UniversalLLM.Providers.OpenAI.toolsComposableProvider
-    <> UniversalLLM.Providers.OpenAI.jsonComposableProvider
+  getComposableProvider = withJSON . withTools $ UniversalLLM.Providers.OpenAI.baseComposableProvider
 
 -- O1 Preview - Reasoning model (no tool support yet)
 data O1Preview = O1Preview deriving (Show, Eq)
@@ -105,12 +98,10 @@ instance ModelName OpenAI O1Preview where
   modelName _ = "o1-preview"
 
 instance HasReasoning O1Preview OpenAI where
-  reasoningComposableProvider = UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+  withReasoning = UniversalLLM.Providers.OpenAI.openAIWithReasoning
 
 instance ProviderImplementation OpenAI O1Preview where
-  getComposableProvider =
-    UniversalLLM.Providers.OpenAI.baseComposableProvider
-    <> UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+  getComposableProvider = withReasoning $ UniversalLLM.Providers.OpenAI.baseComposableProvider
 
 -- O1 Mini - Smaller reasoning model
 data O1Mini = O1Mini deriving (Show, Eq)
@@ -119,9 +110,7 @@ instance ModelName OpenAI O1Mini where
   modelName _ = "o1-mini"
 
 instance HasReasoning O1Mini OpenAI where
-  reasoningComposableProvider = UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+  withReasoning = UniversalLLM.Providers.OpenAI.openAIWithReasoning
 
 instance ProviderImplementation OpenAI O1Mini where
-  getComposableProvider =
-    UniversalLLM.Providers.OpenAI.baseComposableProvider
-    <> UniversalLLM.Providers.OpenAI.reasoningComposableProvider
+  getComposableProvider = withReasoning $ UniversalLLM.Providers.OpenAI.baseComposableProvider

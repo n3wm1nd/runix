@@ -68,12 +68,10 @@ instance ModelName Anthropic ClaudeSonnet4_5 where
   modelName _ = "claude-3-5-sonnet-20241022"
 
 instance HasTools ClaudeSonnet4_5 Anthropic where
-  toolsComposableProvider = UniversalLLM.Providers.Anthropic.toolsComposableProvider
+  withTools = UniversalLLM.Providers.Anthropic.anthropicWithTools
 
 instance ProviderImplementation Anthropic ClaudeSonnet4_5 where
-  getComposableProvider =
-    UniversalLLM.Providers.Anthropic.baseComposableProvider
-    <> UniversalLLM.Providers.Anthropic.toolsComposableProvider
+  getComposableProvider = UniversalLLM.Providers.Anthropic.ensureUserFirst . withTools $ UniversalLLM.Providers.Anthropic.baseComposableProvider
 
 -- Claude Opus - Most capable model
 data ClaudeOpus = ClaudeOpus deriving (Show, Eq)
@@ -82,12 +80,10 @@ instance ModelName Anthropic ClaudeOpus where
   modelName _ = "claude-3-opus-20240229"
 
 instance HasTools ClaudeOpus Anthropic where
-  toolsComposableProvider = UniversalLLM.Providers.Anthropic.toolsComposableProvider
+  withTools = UniversalLLM.Providers.Anthropic.anthropicWithTools
 
 instance ProviderImplementation Anthropic ClaudeOpus where
-  getComposableProvider =
-    UniversalLLM.Providers.Anthropic.baseComposableProvider
-    <> UniversalLLM.Providers.Anthropic.toolsComposableProvider
+  getComposableProvider = UniversalLLM.Providers.Anthropic.ensureUserFirst . withTools $ UniversalLLM.Providers.Anthropic.baseComposableProvider
 
 -- Claude Haiku - Fastest, most compact model
 data ClaudeHaiku = ClaudeHaiku deriving (Show, Eq)
@@ -96,9 +92,7 @@ instance ModelName Anthropic ClaudeHaiku where
   modelName _ = "claude-3-5-haiku-20241022"
 
 instance HasTools ClaudeHaiku Anthropic where
-  toolsComposableProvider = UniversalLLM.Providers.Anthropic.toolsComposableProvider
+  withTools = UniversalLLM.Providers.Anthropic.anthropicWithTools
 
 instance ProviderImplementation Anthropic ClaudeHaiku where
-  getComposableProvider =
-    UniversalLLM.Providers.Anthropic.baseComposableProvider
-    <> UniversalLLM.Providers.Anthropic.toolsComposableProvider
+  getComposableProvider = UniversalLLM.Providers.Anthropic.ensureUserFirst . withTools $ UniversalLLM.Providers.Anthropic.baseComposableProvider
