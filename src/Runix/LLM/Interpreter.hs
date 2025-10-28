@@ -44,6 +44,7 @@ import Runix.LLM.Effects (LLM(..))
 import Runix.HTTP.Effects (HTTP)
 import Runix.RestAPI.Effects (RestAPI, RestEndpoint(..), Endpoint(..), post, restapiHTTP)
 import Runix.Secret.Effects (Secret, getSecret)
+import UniversalLLM.Protocols.Anthropic (AnthropicRequest)
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -126,17 +127,20 @@ instance RestEndpoint AnthropicOAuthAuth where
         , ("User-Agent", "hs-universal-llm (prerelease-dev)")
         ]
 
-interpretAnthropicOAuth :: forall model r a.
-                           ( ProviderImplementation Anthropic model
-                           , ModelName Anthropic model
-                           , HasCodec (ProviderRequest Anthropic)
-                           , HasCodec (ProviderResponse Anthropic)
+interpretAnthropicOAuth :: forall provider model r a.
+                           ( ProviderImplementation provider model
+                           , ModelName provider model
+                           , HasCodec (ProviderRequest provider)
+                           , HasCodec (ProviderResponse provider)
+                           , ProviderRequest provider ~ AnthropicRequest
                            , Members '[HTTP, Fail, Secret String] r
                            )
-                        => model   -- ^ Default model
-                        -> Sem (LLM Anthropic model : r) a
+                        => 
+                        provider
+                        -> model   -- ^ Default model
+                        -> Sem (LLM provider model : r) a
                         -> Sem r a
-interpretAnthropicOAuth defaultModel action = do
+interpretAnthropicOAuth provider defaultModel action = do
     oauthToken <- getSecret
     let auth = AnthropicOAuthAuth oauthToken
         withRestAPI = reinterpret (\case
@@ -144,7 +148,7 @@ interpretAnthropicOAuth defaultModel action = do
 
             QueryLLM configs messages -> do
                 -- Use universal-llm to build the request with magic system prompt
-                let baseRequest = toProviderRequest Anthropic defaultModel configs messages
+                let baseRequest = toProviderRequest provider defaultModel configs messages
                 -- Add the magic system prompt for OAuth
                 let request = withMagicSystemPrompt baseRequest
                 let requestValue = toJSONViaCodec request
@@ -156,7 +160,7 @@ interpretAnthropicOAuth defaultModel action = do
                 case parseEither parseJSONViaCodec responseValue of
                     Left err -> fail $ "Failed to parse Anthropic response: " ++ err
                     Right providerResponse -> do
-                        let resultMessages = fromProviderResponse Anthropic defaultModel configs messages providerResponse
+                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
                         return resultMessages
             ) action
     restapiHTTP auth withRestAPI
