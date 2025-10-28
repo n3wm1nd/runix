@@ -7,88 +7,301 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
 
-module Runix.LLM.Interpreter where
+module Runix.LLM.Interpreter
+  ( -- * Provider interpreters
+    interpretAnthropicAPIKey
+  , interpretAnthropicOAuth
+  , interpretOpenAI
+  , interpretOpenRouter
+  , interpretLlamaCpp
+    -- * Generic model wrappers
+  , GenericModel(..)
+    -- * Re-exports from universal-llm
+  , module UniversalLLM
+  , Anthropic(..)
+  , OpenAI(..)
+  , OpenRouter(..)
+  , LlamaCpp(..)
+  ) where
 
 import Polysemy
 import Polysemy.Fail
-import qualified Data.Text as T
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Aeson as Aeson
-import qualified Data.Text.Encoding as TE
-import Control.Monad (when)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson.Types (parseEither)
+import Data.Text (Text)
 
 import UniversalLLM
-  ( Provider(..)
-  , ProviderImplementation(..)
-  , toProviderRequest
-  , fromProviderResponse
-  , ModelName(..)
-  )
+import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt)
+import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
+import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
 import Runix.LLM.Effects (LLM(..))
-import Runix.HTTP.Effects (HTTP(..), HTTPRequest(..), HTTPResponse(..), httpRequest)
+import Runix.HTTP.Effects (HTTP)
+import Runix.RestAPI.Effects (RestAPI, RestEndpoint(..), Endpoint(..), post, restapiHTTP)
+import Runix.Secret.Effects (Secret, getSecret)
 
--- Generic config for any provider
-data LLMConfig provider = LLMConfig
-    { llmProvider :: provider
-    , llmEndpoint :: String
-    , llmHeaders :: [(String, String)]  -- Auth headers, etc.
+-- ============================================================================
+-- Generic Model Wrapper
+-- ============================================================================
+
+-- Generic model that accepts any model name string
+-- Useful for providers where you want to specify the model at runtime
+-- Example: GenericModel "deepseek/deepseek-chat-v3-0324:free"
+data GenericModel = GenericModel
+    { modelId :: Text
+    } deriving (Show, Eq)
+
+-- Instances for OpenRouter (uses OpenAI protocol)
+instance ModelName OpenRouter GenericModel where
+  modelName m = modelId m
+
+instance ProviderImplementation OpenRouter GenericModel where
+  getComposableProvider = OpenAI.baseComposableProvider
+
+-- ============================================================================
+-- Anthropic Interpreters
+-- ============================================================================
+
+-- Anthropic API Key Authentication
+data AnthropicAPIKeyAuth = AnthropicAPIKeyAuth { anthropicApiKey :: String }
+
+instance RestEndpoint AnthropicAPIKeyAuth where
+    apiroot _ = "https://api.anthropic.com/v1"
+    authheaders api =
+        [ ("x-api-key", anthropicApiKey api)
+        , ("anthropic-version", "2023-06-01")
+        , ("Content-Type", "application/json")
+        ]
+
+interpretAnthropicAPIKey :: forall model provider r a.
+                            ( ProviderImplementation provider model
+                            , ModelName provider model
+                            , HasCodec (ProviderRequest provider)
+                            , HasCodec (ProviderResponse provider)
+                            , Monoid (ProviderRequest provider)
+                            , Members '[HTTP, Fail, Secret String] r
+                            )
+                         => provider -- ^ Provider value
+                         -> model   -- ^ Default model
+                         -> Sem (LLM provider model : r) a
+                         -> Sem r a
+interpretAnthropicAPIKey provider defaultModel action = do
+    apiKey <- getSecret
+    let api = AnthropicAPIKeyAuth apiKey
+        withRestAPI = reinterpret (\case
+            GetModel -> return defaultModel
+
+            QueryLLM configs messages -> do
+                -- Use universal-llm to build the request
+                let request = toProviderRequest provider defaultModel configs messages
+                let requestValue = toJSONViaCodec request
+
+                -- Make the API call
+                responseValue <- post (Endpoint "messages") requestValue
+
+                -- Parse the response
+                case parseEither parseJSONViaCodec responseValue of
+                    Left err -> fail $ "Failed to parse Anthropic response: " ++ err
+                    Right providerResponse -> do
+                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        return resultMessages
+            ) action
+    restapiHTTP api withRestAPI
+
+-- Anthropic OAuth Authentication (for Claude Code)
+data AnthropicOAuthAuth = AnthropicOAuthAuth { anthropicOAuthToken :: String }
+
+instance RestEndpoint AnthropicOAuthAuth where
+    apiroot _ = "https://api.anthropic.com/v1"
+    authheaders auth =
+        [ ("Authorization", "Bearer " <> anthropicOAuthToken auth)
+        , ("anthropic-version", "2023-06-01")
+        , ("anthropic-beta", "oauth-2025-04-20")
+        , ("Content-Type", "application/json")
+        , ("User-Agent", "hs-universal-llm (prerelease-dev)")
+        ]
+
+interpretAnthropicOAuth :: forall model r a.
+                           ( ProviderImplementation Anthropic model
+                           , ModelName Anthropic model
+                           , HasCodec (ProviderRequest Anthropic)
+                           , HasCodec (ProviderResponse Anthropic)
+                           , Members '[HTTP, Fail, Secret String] r
+                           )
+                        => model   -- ^ Default model
+                        -> Sem (LLM Anthropic model : r) a
+                        -> Sem r a
+interpretAnthropicOAuth defaultModel action = do
+    oauthToken <- getSecret
+    let auth = AnthropicOAuthAuth oauthToken
+        withRestAPI = reinterpret (\case
+            GetModel -> return defaultModel
+
+            QueryLLM configs messages -> do
+                -- Use universal-llm to build the request with magic system prompt
+                let baseRequest = toProviderRequest Anthropic defaultModel configs messages
+                -- Add the magic system prompt for OAuth
+                let request = withMagicSystemPrompt baseRequest
+                let requestValue = toJSONViaCodec request
+
+                -- Make the API call
+                responseValue <- post (Endpoint "messages") requestValue
+
+                -- Parse the response
+                case parseEither parseJSONViaCodec responseValue of
+                    Left err -> fail $ "Failed to parse Anthropic response: " ++ err
+                    Right providerResponse -> do
+                        let resultMessages = fromProviderResponse Anthropic defaultModel configs messages providerResponse
+                        return resultMessages
+            ) action
+    restapiHTTP auth withRestAPI
+
+-- ============================================================================
+-- OpenAI Interpreter
+-- ============================================================================
+
+data OpenAIAuth = OpenAIAuth { openaiApiKey :: String }
+
+instance RestEndpoint OpenAIAuth where
+    apiroot _ = "https://api.openai.com/v1"
+    authheaders api =
+        [ ("Authorization", "Bearer " <> openaiApiKey api)
+        , ("Content-Type", "application/json")
+        ]
+
+interpretOpenAI :: forall model provider r a.
+                   ( ProviderImplementation provider model
+                   , ModelName provider model
+                   , HasCodec (ProviderRequest provider)
+                   , HasCodec (ProviderResponse provider)
+                   , Monoid (ProviderRequest provider)
+                   , Members '[HTTP, Fail, Secret String] r
+                   )
+                => provider -- ^ Provider value
+                -> model   -- ^ Default model
+                -> Sem (LLM provider model : r) a
+                -> Sem r a
+interpretOpenAI provider defaultModel action = do
+    apiKey <- getSecret
+    let auth = OpenAIAuth apiKey
+        withRestAPI = reinterpret (\case
+            GetModel -> return defaultModel
+
+            QueryLLM configs messages -> do
+                -- Use universal-llm to build the request
+                let request = toProviderRequest provider defaultModel configs messages
+                let requestValue = toJSONViaCodec request
+
+                -- Make the API call
+                responseValue <- post (Endpoint "chat/completions") requestValue
+
+                -- Parse the response
+                case parseEither parseJSONViaCodec responseValue of
+                    Left err -> fail $ "Failed to parse OpenAI response: " ++ err
+                    Right providerResponse -> do
+                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        return resultMessages
+            ) action
+    restapiHTTP auth withRestAPI
+
+-- ============================================================================
+-- OpenRouter Interpreter
+-- ============================================================================
+
+-- OpenRouter uses the same API format as OpenAI, but different endpoint
+data OpenRouterAuth = OpenRouterAuth { openrouterApiKey :: String }
+
+instance RestEndpoint OpenRouterAuth where
+    apiroot _ = "https://openrouter.ai/api/v1"
+    authheaders api =
+        [ ("Authorization", "Bearer " <> openrouterApiKey api)
+        , ("Content-Type", "application/json")
+        ]
+
+interpretOpenRouter :: forall model provider r a.
+                       ( ProviderImplementation provider model
+                       , ModelName provider model
+                       , HasCodec (ProviderRequest provider)
+                       , HasCodec (ProviderResponse provider)
+                       , Monoid (ProviderRequest provider)
+                       , Members '[HTTP, Fail, Secret String] r
+                       )
+                    => provider -- ^ Provider value
+                    -> model   -- ^ Default model
+                    -> Sem (LLM provider model : r) a
+                    -> Sem r a
+interpretOpenRouter provider defaultModel action = do
+    apiKey <- getSecret
+    let auth = OpenRouterAuth apiKey
+        withRestAPI = reinterpret (\case
+            GetModel -> return defaultModel
+
+            QueryLLM configs messages -> do
+                -- Use universal-llm to build the request
+                let request = toProviderRequest provider defaultModel configs messages
+                let requestValue = toJSONViaCodec request
+
+                -- Make the API call
+                responseValue <- post (Endpoint "chat/completions") requestValue
+
+                -- Parse the response
+                case parseEither parseJSONViaCodec responseValue of
+                    Left err -> fail $ "Failed to parse OpenRouter response: " ++ err
+                    Right providerResponse -> do
+                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        return resultMessages
+            ) action
+    restapiHTTP auth withRestAPI
+
+-- ============================================================================
+-- Llama.cpp Interpreter
+-- ============================================================================
+
+-- Llama.cpp uses OpenAI-compatible API but with custom endpoint
+data LlamaCppAuth = LlamaCppAuth
+    { llamacppEndpoint :: String
     }
 
--- Single interpreter for ALL providers
--- Uses universal-llm's ComposableProvider system to handle provider differences
-interpretLLM :: forall provider model r a.
-                ( ProviderImplementation provider model
-                , ModelName provider model
-                , Monoid (ProviderRequest provider)
-                , HasCodec (ProviderRequest provider)
-                , HasCodec (ProviderResponse provider)
-                , Members '[HTTP, Fail] r
-                )
-             => LLMConfig provider
-             -> model
-             -> Sem (LLM provider model : r) a
-             -> Sem r a
-interpretLLM config defaultModel = interpret $ \case
-    GetModel -> return defaultModel
+instance RestEndpoint LlamaCppAuth where
+    apiroot = llamacppEndpoint
+    authheaders _ = [("Content-Type", "application/json")]
 
-    QueryLLM configs messages -> do
-        let provider = llmProvider config
+-- Llama.cpp uses OpenAI protocol internally
+interpretLlamaCpp :: forall model provider r a.
+                     ( ProviderImplementation provider model
+                     , ModelName provider model
+                     , HasCodec (ProviderRequest provider)
+                     , HasCodec (ProviderResponse provider)
+                     , Members '[HTTP, Fail] r, Monoid (ProviderRequest provider)
+                     )
+                  => String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
+                  -> provider
+                  -> model   -- ^ Default model
+                  -> Sem (LLM provider model : r) a
+                  -> Sem r a
+interpretLlamaCpp endpoint p defaultModel action =
+    let auth = LlamaCppAuth endpoint
+        withRestAPI = reinterpret (\case
+            GetModel -> return defaultModel
 
-        -- Use universal-llm to encode (works for ALL providers)
-        let request = toProviderRequest provider defaultModel configs messages
+            QueryLLM configs messages -> do
+                -- Use universal-llm with LlamaCpp (which uses OpenAI protocol)
+                let request = toProviderRequest p defaultModel configs messages
+                let requestValue = toJSONViaCodec request
 
-        -- Encode to JSON using autodocodec
-        let requestBody = Aeson.encode $ toJSONViaCodec request
+                -- Make the API call
+                responseValue <- post (Endpoint "chat/completions") requestValue
 
-        -- Make HTTP call with retry logic (transparent)
-        HTTPResponse statusCode _headers responseBody <- retryWithBackoff 3 $ do
-            httpRequest $ HTTPRequest "POST" (llmEndpoint config) (llmHeaders config) (Just requestBody)
-
-        -- Check HTTP status code
-        when (statusCode >= 400) $
-            fail $ "HTTP error " ++ show statusCode ++ ": " ++
-                   T.unpack (TE.decodeUtf8With (\_ _ -> Just ' ') (BSL.toStrict responseBody))
-
-        -- Decode response using autodocodec
-        case Aeson.eitherDecode responseBody of
-            Left err -> fail $ "Failed to decode JSON: " ++ err
-            Right jsonValue -> case parseEither parseJSONViaCodec jsonValue of
-                Left err -> fail $ "Failed to parse response: " ++ err
-                Right providerResponse -> do
-                    -- Use universal-llm to decode (works for ALL providers)
-                    let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                    return resultMessages
-
--- Retry helper (transparent error handling)
-retryWithBackoff :: forall r a. Member Fail r => Int -> Sem r a -> Sem r a
-retryWithBackoff maxRetries action = go maxRetries
-  where
-    go :: Int -> Sem r a
-    go 0 = fail "Max retries exceeded"
-    go _n = action  -- TODO: Add proper retry logic with exception catching
-        -- For now, just attempt once. Full retry logic requires exception handling
-        -- which we can add when we integrate with the exception effect
+                -- Parse the response
+                case parseEither parseJSONViaCodec responseValue of
+                    Left err -> fail $ "Failed to parse llama.cpp response: " ++ err
+                    Right providerResponse -> do
+                        let resultMessages = fromProviderResponse p defaultModel configs messages providerResponse
+                        return resultMessages
+            ) action
+    in restapiHTTP auth withRestAPI

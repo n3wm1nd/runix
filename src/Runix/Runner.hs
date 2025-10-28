@@ -31,7 +31,7 @@ import Runix.FileSystem.Effects
 import Runix.HTTP.Effects
 import Runix.Logging.Effects
 import qualified Runix.Compiler.Compiler as Compiler
-import Runix.LLM.OpenRouter (OpenRouter, OpenRouterModel(..), openRouterConfig, interpretOpenRouter)
+import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
 
 -- External libraries
 import Network.HTTP.Simple
@@ -44,13 +44,13 @@ import GHC.Stack
 import Data.List (intercalate)
 import Runix.Compiler.Effects
 import Runix.LLM.Effects
-import Runix.Secret.Effects
+import Runix.Secret.Effects (Secret(..), runSecret)
 
 
 -- Capability marker typeclass
 class Coding model
 
-instance Coding OpenRouterModel
+instance Coding GenericModel
 
 -- Engine - Generic over provider and model
 type SafeEffects provider model = [FileSystem, HTTP, CompileTask, Logging, LLM provider model]
@@ -121,13 +121,17 @@ secretEnv gensecret envname = interpret $ \case
             Just key -> pure $ gensecret key
 
 
--- OpenRouter interpreter using environment variable
-openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM OpenRouter OpenRouterModel : r) a -> Sem r a
+-- OpenRouter interpreter using environment variable via Secret effect
+openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM OpenRouter GenericModel : r) a -> Sem r a
 openrouter action = do
     apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
     case apiKey of
         Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
-        Just key -> interpretOpenRouter (openRouterConfig key) (OpenRouterModel "deepseek/deepseek-chat-v3-0324:free") action
+        Just key ->
+            runSecret (pure key)
+            . interpretOpenRouter OpenRouter (GenericModel "deepseek/deepseek-chat-v3-0324:free")
+            . raiseUnder
+            $ action
 
 
 -- Reinterpreter for HTTP with header support
@@ -182,6 +186,6 @@ _loggingNull = interpret $ \case
 failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
 failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
 
-runUntrusted :: HasCallStack => (forall r . Members (SafeEffects OpenRouter OpenRouterModel) r => Sem r a) -> IO (Either String a)
+runUntrusted :: HasCallStack => (forall r . Members (SafeEffects OpenRouter GenericModel) r => Sem r a) -> IO (Either String a)
 runUntrusted = runM . runError . loggingIO . failLog . httpIO_ . filesystemIO. openrouter .  compileTaskIO
 
