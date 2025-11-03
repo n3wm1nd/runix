@@ -19,6 +19,7 @@ import GHC.Stack
 import Runix.HTTP.Effects
 import Polysemy.Fail
 import Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy.Char8 as BSL
 import System.FilePath
 
 newtype Endpoint = Endpoint String
@@ -58,6 +59,9 @@ restapiHTTP api = interpret $ \case
     parseResponse :: (FromJSON a, Member Fail r) =>
         HTTPResponse -> Sem r a
     parseResponse response =
-        case decode response.body of
+        -- Check HTTP status code first
+        if response.code >= 200 && response.code < 300
+        then case decode response.body of
             Just result -> return result
-            Nothing -> fail $ "Failed to parse JSON response: " <> show response.body
+            Nothing -> fail $ "Failed to parse JSON response: " <> BSL.unpack response.body <> "\n"
+        else fail $ "HTTP error " <> show response.code <> ": " <> BSL.unpack response.body <> "\n"
