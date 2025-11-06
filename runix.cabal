@@ -69,6 +69,7 @@ library
         Runix.LLM.Effects,
         Runix.LLM.Interpreter,
         Runix.LLM.ToolInstances,
+        Runix.LLM.ToolExecution,
         Runix.LLMTypes,
         Runix.Compiler.Effects,
         Runix.Runners.CLI.Single,
