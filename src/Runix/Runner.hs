@@ -23,6 +23,7 @@ import qualified System.Directory
 import qualified System.Process as Process
 import System.Exit (ExitCode(..))
 import qualified System.FilePath.Glob as Glob
+import Control.Monad (filterM)
 
 -- Polysemy libraries
 import Polysemy
@@ -88,11 +89,13 @@ filesystemIO = interpret $ \case
         Glob.globDir1 compiledPattern base
 
 -- Grep interpreter using ripgrep
-grepIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (Grep : r) a -> Sem r a
+grepIO :: HasCallStack => Members [Embed IO, Logging, FileSystem] r => Sem (Grep : r) a -> Sem r a
 grepIO = interpret $ \case
     GrepSearch basePath pattern -> do
         info $ "grep search: " <> fromString pattern <> " in " <> fromString basePath
-        embed $ ripgrepSearch basePath pattern
+        allMatches <- embed $ ripgrepSearch basePath pattern
+        -- Filter results to only include files that pass FileSystem access controls
+        filterM (\match -> fileExists (matchFile match)) allMatches
   where
     ripgrepSearch :: FilePath -> String -> IO [GrepMatch]
     ripgrepSearch base pat = do
