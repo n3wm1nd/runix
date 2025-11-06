@@ -64,6 +64,8 @@ library
         Runix.Secret.Effects,
         Runix.Logging.Effects,
         Runix.FileSystem.Effects,
+        Runix.Grep.Effects,
+        Runix.Bash.Effects,
         Runix.HTTP.Effects,
         Runix.RestAPI.Effects,
         Runix.LLM.Effects,

@@ -23,6 +23,7 @@ data FileSystem (m :: Type -> Type) a where
     ListFiles :: FilePath -> FileSystem m [FilePath]
     FileExists :: FilePath -> FileSystem m Bool
     IsDirectory :: FilePath -> FileSystem m Bool
+    Glob :: FilePath -> String -> FileSystem m [FilePath]  -- base path and pattern
 
 makeSem ''FileSystem
 
@@ -36,6 +37,7 @@ limitedAccess isAllowed = intercept $ \action -> case isAllowed action of
         ListFiles f -> listFiles f
         FileExists f -> fileExists f
         IsDirectory f -> isDirectory f
+        Glob base pat -> glob base pat
 
     ForbidAccess reason -> fail $ "not allowed: " ++ reason
 
@@ -46,6 +48,7 @@ limitSubpath p = limitedAccess (\case
     ListFiles sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
     FileExists sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
     IsDirectory sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
+    Glob base _pat | splitPath p `isPrefixOf` splitPath base -> AllowAccess
     _ -> ForbidAccess $ p ++ " is not in explicitly allowed path " ++ p
     )
 
@@ -60,10 +63,14 @@ chrootSubpath chrootPath = intercept $ \case
         return $ fmap (makeRelative chrootPath) files
     FileExists f -> fileExists (chrootPath </> f)
     IsDirectory f -> isDirectory (chrootPath </> f)
+    Glob base pat -> do
+        files <- glob (chrootPath </> base) pat
+        -- Remove the chroot prefix from returned paths
+        return $ fmap (makeRelative chrootPath) files
 
 -- Hide dotfiles (files starting with '.')
 hideDotfiles :: Members [FileSystem, Fail] r => Sem (FileSystem : r) a -> Sem (FileSystem : r) a
-hideDotfiles = intercept $ \case 
+hideDotfiles = intercept $ \case
     ReadFile f | isDotfile f -> fail $ "Access to dotfile denied: " ++ f
                 | otherwise -> readFile f
     WriteFile f c | isDotfile f -> fail $ "Access to dotfile denied: " ++ f
@@ -76,6 +83,10 @@ hideDotfiles = intercept $ \case
                  | otherwise -> fileExists f
     IsDirectory f | isDotfile f -> return False  -- Hide existence of dot directories
                   | otherwise -> isDirectory f
+    Glob base pat -> do
+        files <- glob base pat
+        -- Filter out dotfiles from the results
+        return $ Prelude.filter (not . isDotfile . takeFileName) files
   where
     isDotfile :: FilePath -> Bool
     isDotfile path = case takeFileName path of

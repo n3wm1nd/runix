@@ -14,12 +14,16 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
 
-module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, httpIO, httpIO_, withRequestTimeout, secretEnv, loggingIO, failLog, Coding) where
+module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, grepIO, bashIO, httpIO, httpIO_, withRequestTimeout, secretEnv, loggingIO, failLog, Coding) where
 
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
 import System.Environment (lookupEnv)
 import qualified System.Directory
+import System.FilePath ((</>), takeFileName)
+import Control.Monad (forM)
+import qualified System.Process as Process
+import System.Exit (ExitCode(..))
 
 -- Polysemy libraries
 import Polysemy
@@ -28,6 +32,8 @@ import Polysemy.Error
 
 -- Local modules
 import Runix.FileSystem.Effects
+import Runix.Grep.Effects
+import Runix.Bash.Effects
 import Runix.HTTP.Effects
 import Runix.Logging.Effects
 import qualified Runix.Compiler.Compiler as Compiler
@@ -42,6 +48,7 @@ import Data.String (fromString)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro)
 import GHC.Stack
 import Data.List (intercalate)
+import Data.Maybe (mapMaybe)
 import Runix.Compiler.Effects
 import Runix.LLM.Effects
 import Runix.Secret.Effects (Secret(..), runSecret)
@@ -72,9 +79,96 @@ filesystemIO = interpret $ \case
     IsDirectory p -> do
         info $ "checking is directory: " <> fromString p
         embed $ System.Directory.doesDirectoryExist p
+    Glob basePath pattern -> do
+        info $ "glob pattern: " <> fromString pattern <> " in " <> fromString basePath
+        embed $ globFiles basePath pattern
+  where
+    -- Simple glob implementation using find command
+    -- TODO: Replace with proper Haskell glob library
+    globFiles :: FilePath -> String -> IO [FilePath]
+    globFiles base pat = do
+        -- For now, use a simple implementation that lists all files
+        -- A proper implementation would use System.FilePath.Glob or similar
+        allFiles <- listDirectoryRecursive base
+        return $ Prelude.filter (matchSimplePattern pat) allFiles
 
+    listDirectoryRecursive :: FilePath -> IO [FilePath]
+    listDirectoryRecursive dir = do
+        names <- System.Directory.listDirectory dir
+        paths <- forM names $ \name -> do
+            let path = dir </> name
+            isDir <- System.Directory.doesDirectoryExist path
+            if isDir
+                then listDirectoryRecursive path
+                else return [path]
+        return $ concat paths
 
+    -- Very simple pattern matching (just supports * wildcard)
+    matchSimplePattern :: String -> FilePath -> Bool
+    matchSimplePattern pat path =
+        let fileName = takeFileName path
+        in matchWildcard pat fileName
 
+    matchWildcard :: String -> String -> Bool
+    matchWildcard ('*':ps) str = any (\i -> matchWildcard ps (drop i str)) [0..length str]
+    matchWildcard (p:ps) (s:ss) | p == s = matchWildcard ps ss
+    matchWildcard [] [] = True
+    matchWildcard _ _ = False
+
+-- Grep interpreter using ripgrep
+grepIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (Grep : r) a -> Sem r a
+grepIO = interpret $ \case
+    GrepSearch basePath pattern -> do
+        info $ "grep search: " <> fromString pattern <> " in " <> fromString basePath
+        embed $ ripgrepSearch basePath pattern
+  where
+    ripgrepSearch :: FilePath -> String -> IO [GrepMatch]
+    ripgrepSearch base pat = do
+        -- Use ripgrep with line numbers and file names
+        (exitCode, stdout, _stderr) <- Process.readProcessWithExitCode
+            "rg"
+            ["--line-number", "--with-filename", "--", pat, base]
+            ""
+        case exitCode of
+            ExitSuccess -> do
+                -- Parse ripgrep output: "file:line:text"
+                let outputLines = lines stdout
+                return $ parseRipgrepOutput outputLines
+            _ -> return []
+
+    parseRipgrepOutput :: [String] -> [GrepMatch]
+    parseRipgrepOutput = mapMaybe parseLine
+      where
+        parseLine :: String -> Maybe GrepMatch
+        parseLine line = case break (== ':') line of
+            (file, ':' : rest) -> case break (== ':') rest of
+                (lineNumStr, ':' : text) -> case reads lineNumStr of
+                    [(lineNum, "")] -> Just $ GrepMatch
+                        { matchFile = file
+                        , matchLine = lineNum
+                        , matchText = T.pack text
+                        }
+                    _ -> Nothing
+                _ -> Nothing
+            _ -> Nothing
+
+-- Bash interpreter
+bashIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (Bash : r) a -> Sem r a
+bashIO = interpret $ \case
+    BashExec cmd -> do
+        info $ "bash exec: " <> fromString cmd
+        embed $ runBashCommand cmd
+  where
+    runBashCommand :: String -> IO BashOutput
+    runBashCommand cmd = do
+        (exitCode, stdout, stderr) <- Process.readProcessWithExitCode
+            "/bin/bash"
+            ["-c", cmd]
+            ""
+        let code = case exitCode of
+                ExitSuccess -> 0
+                ExitFailure c -> c
+        return $ BashOutput code (T.pack stdout) (T.pack stderr)
 
 -- HTTP interpreter with header support
 httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => (Request -> Request) -> Sem (HTTP : r) a -> Sem r a
