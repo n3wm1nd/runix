@@ -20,10 +20,9 @@ module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, grepIO, bashIO, ht
 import Prelude hiding (readFile, writeFile, error)
 import System.Environment (lookupEnv)
 import qualified System.Directory
-import System.FilePath ((</>), takeFileName)
-import Control.Monad (forM)
 import qualified System.Process as Process
 import System.Exit (ExitCode(..))
+import qualified System.FilePath.Glob as Glob
 
 -- Polysemy libraries
 import Polysemy
@@ -83,37 +82,10 @@ filesystemIO = interpret $ \case
         info $ "glob pattern: " <> fromString pattern <> " in " <> fromString basePath
         embed $ globFiles basePath pattern
   where
-    -- Simple glob implementation using find command
-    -- TODO: Replace with proper Haskell glob library
     globFiles :: FilePath -> String -> IO [FilePath]
     globFiles base pat = do
-        -- For now, use a simple implementation that lists all files
-        -- A proper implementation would use System.FilePath.Glob or similar
-        allFiles <- listDirectoryRecursive base
-        return $ Prelude.filter (matchSimplePattern pat) allFiles
-
-    listDirectoryRecursive :: FilePath -> IO [FilePath]
-    listDirectoryRecursive dir = do
-        names <- System.Directory.listDirectory dir
-        paths <- forM names $ \name -> do
-            let path = dir </> name
-            isDir <- System.Directory.doesDirectoryExist path
-            if isDir
-                then listDirectoryRecursive path
-                else return [path]
-        return $ concat paths
-
-    -- Very simple pattern matching (just supports * wildcard)
-    matchSimplePattern :: String -> FilePath -> Bool
-    matchSimplePattern pat path =
-        let fileName = takeFileName path
-        in matchWildcard pat fileName
-
-    matchWildcard :: String -> String -> Bool
-    matchWildcard ('*':ps) str = any (\i -> matchWildcard ps (drop i str)) [0..length str]
-    matchWildcard (p:ps) (s:ss) | p == s = matchWildcard ps ss
-    matchWildcard [] [] = True
-    matchWildcard _ _ = False
+        let compiledPattern = Glob.compile pat
+        Glob.globDir1 compiledPattern base
 
 -- Grep interpreter using ripgrep
 grepIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (Grep : r) a -> Sem r a
