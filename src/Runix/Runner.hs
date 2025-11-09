@@ -14,16 +14,23 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
 
-module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, grepIO, bashIO, cmdIO, httpIO, httpIO_, withRequestTimeout, secretEnv, loggingIO, failLog, Coding) where
+module Runix.Runner (
+    runUntrusted,
+    SafeEffects,
+    -- Re-exports from other modules
+    module Runix.FileSystem.Effects,
+    module Runix.Grep.Effects,
+    module Runix.Bash.Effects,
+    module Runix.Cmd.Effects,
+    module Runix.HTTP.Effects,
+    module Runix.Logging.Effects,
+    module Runix.Secret.Effects,
+    module Runix.Compiler.Effects,
+    Coding
+) where
 
 -- Standard libraries
-import Prelude hiding (readFile, writeFile, error)
 import System.Environment (lookupEnv)
-import qualified System.Directory
-import qualified System.Process as Process
-import System.Exit (ExitCode(..))
-import qualified System.FilePath.Glob as Glob
-import Control.Monad (filterM)
 
 -- Polysemy libraries
 import Polysemy
@@ -37,22 +44,15 @@ import Runix.Bash.Effects
 import Runix.Cmd.Effects
 import Runix.HTTP.Effects
 import Runix.Logging.Effects
+import Runix.Secret.Effects
+import Runix.Compiler.Effects
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
+import Runix.LLM.Effects
 
 -- External libraries
-import Network.HTTP.Simple
-import qualified Control.Monad.Catch as CMC
-import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
-import Data.String (fromString)
-import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro)
 import GHC.Stack
-import Data.List (intercalate)
-import Data.Maybe (mapMaybe)
-import Runix.Compiler.Effects
-import Runix.LLM.Effects
-import Runix.Secret.Effects (Secret(..), runSecret)
 
 
 -- Capability marker typeclass
@@ -63,154 +63,9 @@ instance Coding GenericModel
 -- Engine - Generic over provider and model
 type SafeEffects provider model = [FileSystem, HTTP, CompileTask, Logging, LLM provider model]
 
-filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
-filesystemIO = interpret $ \case
-    ReadFile p -> do
-        info $ "reading file: " <> fromString p
-        embed $ BL.readFile p
-    WriteFile p d -> do
-        info $ "writing file: " <> fromString p
-        embed $ BL.writeFile p d
-    ListFiles p -> do
-        info $ "listing files: " <> fromString p
-        embed $ System.Directory.listDirectory p
-    FileExists p -> do
-        info $ "checking file exists: " <> fromString p
-        embed $ System.Directory.doesFileExist p
-    IsDirectory p -> do
-        info $ "checking is directory: " <> fromString p
-        embed $ System.Directory.doesDirectoryExist p
-    Glob basePath pattern -> do
-        info $ "glob pattern: " <> fromString pattern <> " in " <> fromString basePath
-        embed $ globFiles basePath pattern
-  where
-    globFiles :: FilePath -> String -> IO [FilePath]
-    globFiles base pat = do
-        let compiledPattern = Glob.compile pat
-        Glob.globDir1 compiledPattern base
-
--- Grep interpreter using ripgrep
-grepIO :: HasCallStack => Members [Cmd, Logging, FileSystem] r => Sem (Grep : r) a -> Sem r a
-grepIO = interpret $ \case
-    GrepSearch basePath pattern -> do
-        info $ "grep search: " <> fromString pattern <> " in " <> fromString basePath
-        result <- cmdExec "rg" ["--line-number", "--with-filename", "--", pattern, basePath]
-        let allMatches = case result.exitCode of
-                0 -> parseRipgrepOutput $ lines $ T.unpack result.stdout
-                _ -> []
-        -- Filter results to only include files that pass FileSystem access controls
-        filterM (\match -> fileExists (matchFile match)) allMatches
-  where
-    parseRipgrepOutput :: [String] -> [GrepMatch]
-    parseRipgrepOutput = mapMaybe parseLine
-      where
-        parseLine :: String -> Maybe GrepMatch
-        parseLine line = case break (== ':') line of
-            (file, ':' : rest) -> case break (== ':') rest of
-                (lineNumStr, ':' : text) -> case reads lineNumStr of
-                    [(lineNum, "")] -> Just $ GrepMatch
-                        { matchFile = file
-                        , matchLine = lineNum
-                        , matchText = T.pack text
-                        }
-                    _ -> Nothing
-                _ -> Nothing
-            _ -> Nothing
-
--- Bash interpreter
-bashIO :: HasCallStack => Members [Cmd, Logging] r => Sem (Bash : r) a -> Sem r a
-bashIO = interpret $ \case
-    BashExec cmd -> do
-        info $ "bash exec: " <> fromString cmd
-        result <- cmdExec "/bin/bash" ["-c", cmd]
-        return $ BashOutput result.exitCode result.stdout result.stderr
-
--- Cmd interpreter
-cmdIO :: Member (Embed IO) r => Sem (Cmd : r) a -> Sem r a
-cmdIO = interpret $ \case
-    CmdExec prog args -> embed $ runCommand prog args
-  where
-    runCommand :: FilePath -> [String] -> IO CmdOutput
-    runCommand prog args = do
-        (exitCode, stdout, stderr) <- Process.readProcessWithExitCode prog args ""
-        let code = case exitCode of
-                ExitSuccess -> 0
-                ExitFailure c -> c
-        return $ CmdOutput code (T.pack stdout) (T.pack stderr)
-
--- HTTP interpreter with header support
-httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => (Request -> Request) -> Sem (HTTP : r) a -> Sem r a
-httpIO requestTransform = interpret $ \case
-    HttpRequest request -> do
-        parsed <- embed $ CMC.try (parseRequest request.uri)
-        req <- case parsed of
-            Right r -> return r
-            Left (e :: CMC.SomeException) -> fail $
-                "error parsing uri: " <> request.uri <> "\n" <> show e
-        let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
-        -- info $ "setting headers: " <> fromString (show hdrs)
-        let hr :: Request =
-                setRequestMethod (fromString request.method) .
-                setRequestHeaders hdrs .
-                requestTransform .
-                case request.body of
-                    Just b -> setRequestBody (RequestBodyLBS b)
-                    Nothing -> Prelude.id
-                $ req
-        info $ fromString request.method <> " " <> fromString request.uri
-        -- info $ "with data: " <> fromString (show request.body)
-        resp <- httpLBS hr
-        return $ HTTPResponse
-            { code = getResponseStatusCode resp
-            , headers = map (\(hn, b) -> (show hn, show b)) $ getResponseHeaders resp -- FIXME
-            , body = getResponseBody resp
-            }
-
--- Convenience function with default behavior (no request transformation)
-httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
-httpIO_ = httpIO Prelude.id
-
--- Helper function to set request timeout in seconds
-withRequestTimeout :: Int -> Request -> Request
-withRequestTimeout seconds = setRequestResponseTimeout (responseTimeoutMicro (seconds * 1000000))
-
-secretEnv :: Members [Fail, Embed IO] r => (String -> s) -> String -> Sem (Secret s :r) a -> Sem r a
-secretEnv gensecret envname = interpret $ \case
-    GetSecret -> do
-        mk <- embed $ lookupEnv envname
-        case mk of
-            Nothing -> fail $ "secretEnv: ENV " <> envname <> " is unset"
-            Just key -> pure $ gensecret key
-
-
--- OpenRouter interpreter using environment variable via Secret effect
-openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM OpenRouter GenericModel : r) a -> Sem r a
-openrouter action = do
-    apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
-    case apiKey of
-        Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
-        Just key ->
-            runSecret (pure key)
-            . interpretOpenRouter OpenRouter (GenericModel "deepseek/deepseek-chat-v3-0324:free")
-            . raiseUnder
-            $ action
-
-
--- Reinterpreter for HTTP with header support
--- NOTE: Currently unused, but kept for future use
-_withHeaders :: Members [Fail, Logging, HTTP] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
-_withHeaders modifyRequest = intercept $ \case
-    HttpRequest request -> do
-        info "intercepted request"
-        httpRequest (modifyRequest request)
-
--- Example usage of withHeaders for setting authentication tokens:
--- 
--- authenticatedRequest :: Members [HTTP, RestAPI] r => Sem (HTTP : RestAPI : r) a -> Sem (HTTP : RestAPI : r) a
--- authenticatedRequest = withHeaders $ \req -> req { headers = ("Authorization", "Bearer token123") : headers req }
-
-
-compileTaskIO :: HasCallStack => Members [ Embed IO, Logging, FileSystem ] r => Sem (CompileTask : r) a -> Sem r a
+-- | IO interpreter for CompileTask effect
+-- NOTE: This must stay here to avoid circular dependency (Compiler.Compiler imports Compiler.Effects)
+compileTaskIO :: HasCallStack => Members [Embed IO, Logging, FileSystem] r => Sem (CompileTask : r) a -> Sem r a
 compileTaskIO = interpret $ \case
     CompileTask project -> do
         info $ "compiling haskell code: " <> T.pack project.name
@@ -226,27 +81,21 @@ compileTaskIO = interpret $ \case
                 info $ T.pack $ show s.compileWarnings
                 return s
 
+-- | Example OpenRouter interpreter using environment variable
+-- This demonstrates how to compose the various effect interpreters
+openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM OpenRouter GenericModel : r) a -> Sem r a
+openrouter action = do
+    apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
+    case apiKey of
+        Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
+        Just key ->
+            runSecret (pure key)
+            . interpretOpenRouter OpenRouter (GenericModel "deepseek/deepseek-chat-v3-0324:free")
+            . raiseUnder
+            $ action
 
-loggingIO :: HasCallStack => Member (Embed IO) r => Sem (Logging : r) a -> Sem r a
-loggingIO = interpret $ \v -> do
-    case v of
-        Log level cs m -> embed $ putStrLn $ prefix level <> l cs m
-    where
-        prefix Info = "info: "
-        prefix Warning = "warn: "
-        prefix Error = " err: "
-        l cs m = funname (getCallStack cs) <> T.unpack m
-        funname (_:f:frames) = (intercalate "." . reverse . map fst) (f:frames) <> ": "
-        funname _ = ""
-
--- NOTE: Currently unused, but kept for future use
-_loggingNull :: Sem (Logging : r) a -> Sem r a
-_loggingNull = interpret $ \case
-    Log _ _ _ -> pure ()
-
-failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
-failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
-
+-- | Example runner combining all effect interpreters
+-- This demonstrates the complete effect stack composition
 runUntrusted :: HasCallStack => (forall r . Members (SafeEffects OpenRouter GenericModel) r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . httpIO_ . filesystemIO. openrouter .  compileTaskIO
+runUntrusted = runM . runError . loggingIO . failLog . httpIO_ . filesystemIO . openrouter . compileTaskIO
 

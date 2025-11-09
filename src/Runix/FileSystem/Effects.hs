@@ -12,10 +12,16 @@ module Runix.FileSystem.Effects where
 import Data.Kind (Type)
 import Polysemy
 import Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy as BL
 import Prelude hiding (readFile, writeFile)
 import Polysemy.Fail
-import System.FilePath 
+import System.FilePath
 import Data.List (isPrefixOf)
+import Data.String (fromString)
+import GHC.Stack
+import qualified System.Directory
+import qualified System.FilePath.Glob as Glob
+import Runix.Logging.Effects (Logging, info)
 
 data FileSystem (m :: Type -> Type) a where
     ReadFile :: FilePath -> FileSystem m ByteString
@@ -92,3 +98,30 @@ hideDotfiles = intercept $ \case
     isDotfile path = case takeFileName path of
         ('.':_) -> True
         _ -> False
+
+-- | IO interpreter for FileSystem effect
+filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystem : r) a -> Sem r a
+filesystemIO = interpret $ \case
+    ReadFile p -> do
+        info $ fromString "reading file: " <> fromString p
+        embed $ BL.readFile p
+    WriteFile p d -> do
+        info $ fromString "writing file: " <> fromString p
+        embed $ BL.writeFile p d
+    ListFiles p -> do
+        info $ fromString "listing files: " <> fromString p
+        embed $ System.Directory.listDirectory p
+    FileExists p -> do
+        info $ fromString "checking file exists: " <> fromString p
+        embed $ System.Directory.doesFileExist p
+    IsDirectory p -> do
+        info $ fromString "checking is directory: " <> fromString p
+        embed $ System.Directory.doesDirectoryExist p
+    Glob basePath pattern -> do
+        info $ fromString "glob pattern: " <> fromString pattern <> fromString " in " <> fromString basePath
+        embed $ globFiles basePath pattern
+  where
+    globFiles :: FilePath -> String -> IO [FilePath]
+    globFiles base pat = do
+        let compiledPattern = Glob.compile pat
+        Glob.globDir1 compiledPattern base

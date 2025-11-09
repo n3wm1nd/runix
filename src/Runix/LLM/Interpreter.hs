@@ -30,7 +30,7 @@ module Runix.LLM.Interpreter
 
 import Polysemy
 import Polysemy.Fail
-import qualified Data.Aeson as Aeson
+import Data.Aeson ()  -- Import only instances
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
@@ -42,7 +42,7 @@ import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
 import Runix.LLM.Effects (LLM(..))
 import Runix.HTTP.Effects (HTTP)
-import Runix.RestAPI.Effects (RestAPI, RestEndpoint(..), Endpoint(..), post, restapiHTTP)
+import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, restapiHTTP)
 import Runix.Secret.Effects (Secret, getSecret)
 import UniversalLLM.Protocols.Anthropic (AnthropicRequest)
 
