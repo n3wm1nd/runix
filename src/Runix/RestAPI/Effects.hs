@@ -27,25 +27,32 @@ newtype RestData a = RestData a
 newtype RestResponse a = RestResponse a
 
 data RestAPI p (m :: Type -> Type) a where
-    Get :: (FromJSON s) => Endpoint -> RestAPI p m s
-    Post :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
-    Put :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
-    Delete :: (FromJSON s) => Endpoint -> RestAPI p m s
-    Patch :: (ToJSON r, FromJSON s) => Endpoint -> r -> RestAPI p m s
-    Rest :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI p m s
+    RestRequest :: (ToJSON r, FromJSON s) => String -> Endpoint -> Maybe r -> RestAPI p m s
+
 makeSem ''RestAPI
+
+-- Convenience functions for common HTTP methods
+get :: (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
+get endpoint = restRequest "GET" endpoint (Nothing :: Maybe ())
+
+post :: (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
+post endpoint body = restRequest "POST" endpoint (Just body)
+
+put :: (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
+put endpoint body = restRequest "PUT" endpoint (Just body)
+
+delete :: (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
+delete endpoint = restRequest "DELETE" endpoint (Nothing :: Maybe ())
+
+patch :: (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
+patch endpoint body = restRequest "PATCH" endpoint (Just body)
 class RestEndpoint p where
     apiroot :: p -> String
     authheaders :: p -> [(String, String)]
 
 restapiHTTP :: HasCallStack => (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
 restapiHTTP api = interpret $ \case
-    Get e -> request "GET" e Nothing
-    Post e d -> request "POST" e (Just $ encode d)
-    Put e d -> request "PUT" e (Just $ encode d)
-    Delete e -> request "DELETE" e Nothing
-    Patch e d -> request "PATCH" e (Just $ encode d)
-    Rest method e d -> request method e (fmap encode d)
+    RestRequest method e maybeData -> request method e (fmap encode maybeData)
   where
     request :: (FromJSON a, Members [Fail, HTTP] r) =>
         String -> Endpoint -> Maybe ByteString -> Sem r a
