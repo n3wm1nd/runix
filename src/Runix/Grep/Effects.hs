@@ -21,7 +21,7 @@ import GHC.Stack
 import Runix.Cmd.Effects (Cmd, cmdExec)
 import qualified Runix.Cmd.Effects as CmdE
 import Runix.Logging.Effects (Logging, info)
-import Runix.FileSystem.Effects (FileSystem, fileExists)
+import Runix.FileSystem.Effects (FileSystemRead, fileExists)
 
 -- | Grep search result
 data GrepMatch = GrepMatch
@@ -38,7 +38,7 @@ data Grep (m :: Type -> Type) a where
 makeSem ''Grep
 
 -- | Grep interpreter using ripgrep
-grepIO :: HasCallStack => Members [Cmd, Logging, FileSystem] r => Sem (Grep : r) a -> Sem r a
+grepIO :: HasCallStack => Members [Cmd, Logging, FileSystemRead] r => Sem (Grep : r) a -> Sem r a
 grepIO = interpret $ \case
     GrepSearch basePath pattern -> do
         info $ fromString "grep search: " <> fromString pattern <> fromString " in " <> fromString basePath

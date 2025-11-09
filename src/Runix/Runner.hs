@@ -61,11 +61,11 @@ class Coding model
 instance Coding GenericModel
 
 -- Engine - Generic over provider and model
-type SafeEffects provider model = [FileSystem, HTTP, CompileTask, Logging, LLM provider model]
+type SafeEffects provider model = [FileSystemRead, FileSystemWrite, HTTP, CompileTask, Logging, LLM provider model]
 
 -- | IO interpreter for CompileTask effect
 -- NOTE: This must stay here to avoid circular dependency (Compiler.Compiler imports Compiler.Effects)
-compileTaskIO :: HasCallStack => Members [Embed IO, Logging, FileSystem] r => Sem (CompileTask : r) a -> Sem r a
+compileTaskIO :: HasCallStack => Members [Embed IO, Logging, FileSystemRead, FileSystemWrite] r => Sem (CompileTask : r) a -> Sem r a
 compileTaskIO = interpret $ \case
     CompileTask project -> do
         info $ "compiling haskell code: " <> T.pack project.name
