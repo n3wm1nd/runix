@@ -14,7 +14,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
 
-module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, grepIO, bashIO, httpIO, httpIO_, withRequestTimeout, secretEnv, loggingIO, failLog, Coding) where
+module Runix.Runner (runUntrusted, SafeEffects, filesystemIO, grepIO, bashIO, cmdIO, httpIO, httpIO_, withRequestTimeout, secretEnv, loggingIO, failLog, Coding) where
 
 -- Standard libraries
 import Prelude hiding (readFile, writeFile, error)
@@ -34,6 +34,7 @@ import Polysemy.Error
 import Runix.FileSystem.Effects
 import Runix.Grep.Effects
 import Runix.Bash.Effects
+import Runix.Cmd.Effects
 import Runix.HTTP.Effects
 import Runix.Logging.Effects
 import qualified Runix.Compiler.Compiler as Compiler
@@ -89,28 +90,17 @@ filesystemIO = interpret $ \case
         Glob.globDir1 compiledPattern base
 
 -- Grep interpreter using ripgrep
-grepIO :: HasCallStack => Members [Embed IO, Logging, FileSystem] r => Sem (Grep : r) a -> Sem r a
+grepIO :: HasCallStack => Members [Cmd, Logging, FileSystem] r => Sem (Grep : r) a -> Sem r a
 grepIO = interpret $ \case
     GrepSearch basePath pattern -> do
         info $ "grep search: " <> fromString pattern <> " in " <> fromString basePath
-        allMatches <- embed $ ripgrepSearch basePath pattern
+        result <- cmdExec "rg" ["--line-number", "--with-filename", "--", pattern, basePath]
+        let allMatches = case result.exitCode of
+                0 -> parseRipgrepOutput $ lines $ T.unpack result.stdout
+                _ -> []
         -- Filter results to only include files that pass FileSystem access controls
         filterM (\match -> fileExists (matchFile match)) allMatches
   where
-    ripgrepSearch :: FilePath -> String -> IO [GrepMatch]
-    ripgrepSearch base pat = do
-        -- Use ripgrep with line numbers and file names
-        (exitCode, stdout, _stderr) <- Process.readProcessWithExitCode
-            "rg"
-            ["--line-number", "--with-filename", "--", pat, base]
-            ""
-        case exitCode of
-            ExitSuccess -> do
-                -- Parse ripgrep output: "file:line:text"
-                let outputLines = lines stdout
-                return $ parseRipgrepOutput outputLines
-            _ -> return []
-
     parseRipgrepOutput :: [String] -> [GrepMatch]
     parseRipgrepOutput = mapMaybe parseLine
       where
@@ -128,22 +118,25 @@ grepIO = interpret $ \case
             _ -> Nothing
 
 -- Bash interpreter
-bashIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (Bash : r) a -> Sem r a
+bashIO :: HasCallStack => Members [Cmd, Logging] r => Sem (Bash : r) a -> Sem r a
 bashIO = interpret $ \case
     BashExec cmd -> do
         info $ "bash exec: " <> fromString cmd
-        embed $ runBashCommand cmd
+        result <- cmdExec "/bin/bash" ["-c", cmd]
+        return $ BashOutput result.exitCode result.stdout result.stderr
+
+-- Cmd interpreter
+cmdIO :: Member (Embed IO) r => Sem (Cmd : r) a -> Sem r a
+cmdIO = interpret $ \case
+    CmdExec prog args -> embed $ runCommand prog args
   where
-    runBashCommand :: String -> IO BashOutput
-    runBashCommand cmd = do
-        (exitCode, stdout, stderr) <- Process.readProcessWithExitCode
-            "/bin/bash"
-            ["-c", cmd]
-            ""
+    runCommand :: FilePath -> [String] -> IO CmdOutput
+    runCommand prog args = do
+        (exitCode, stdout, stderr) <- Process.readProcessWithExitCode prog args ""
         let code = case exitCode of
                 ExitSuccess -> 0
                 ExitFailure c -> c
-        return $ BashOutput code (T.pack stdout) (T.pack stderr)
+        return $ CmdOutput code (T.pack stdout) (T.pack stderr)
 
 -- HTTP interpreter with header support
 httpIO :: HasCallStack => Members [Fail, Logging, Embed IO] r => (Request -> Request) -> Sem (HTTP : r) a -> Sem r a

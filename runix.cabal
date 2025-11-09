@@ -66,6 +66,7 @@ library
         Runix.FileSystem.Effects,
         Runix.Grep.Effects,
         Runix.Bash.Effects,
+        Runix.Cmd.Effects,
         Runix.HTTP.Effects,
         Runix.RestAPI.Effects,
         Runix.LLM.Effects,
