@@ -237,10 +237,11 @@ compileTaskIO = interpret $ \case
 loggingIO :: HasCallStack => Member (Embed IO) r => Sem (Logging : r) a -> Sem r a
 loggingIO = interpret $ \v -> do
     case v of
-        Info cs m -> embed $ putStrLn $ "info: " <> l cs m
-        Warning cs m -> embed $ putStrLn $ "warn: " <> l cs m
-        Error cs m -> embed $ putStrLn $ " err: " <> l cs m
+        Log level cs m -> embed $ putStrLn $ prefix level <> l cs m
     where
+        prefix Info = "info: "
+        prefix Warning = "warn: "
+        prefix Error = " err: "
         l cs m = funname (getCallStack cs) <> T.unpack m
         funname (_:f:frames) = (intercalate "." . reverse . map fst) (f:frames) <> ": "
         funname _ = ""
@@ -248,9 +249,7 @@ loggingIO = interpret $ \v -> do
 -- NOTE: Currently unused, but kept for future use
 _loggingNull :: Sem (Logging : r) a -> Sem r a
 _loggingNull = interpret $ \case
-    Info _ _ -> pure ()
-    Warning _ _ -> pure ()
-    Error _ _ -> pure ()
+    Log _ _ _ -> pure ()
 
 failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
 failLog = interpret $ \(Fail e) -> error (T.pack e) >> throw e
