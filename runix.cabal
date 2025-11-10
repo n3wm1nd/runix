@@ -67,6 +67,8 @@ library
         Runix.Grep.Effects,
         Runix.Bash.Effects,
         Runix.Cmd.Effects,
+        Runix.Streaming.Effects,
+        Runix.Streaming.SSE,
         Runix.HTTP.Effects,
         Runix.RestAPI.Effects,
         Runix.LLM.Effects,
@@ -87,7 +89,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, exceptions, autodocodec, autodocodec-schema, universal-llm, Glob
+    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, http-client, http-types, conduit, exceptions, autodocodec, autodocodec-schema, universal-llm, Glob, stm, vector
 
     -- Directories containing source files.
     hs-source-dirs:   src

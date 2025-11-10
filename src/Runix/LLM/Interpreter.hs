@@ -41,10 +41,12 @@ import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
 import Runix.LLM.Effects (LLM(..))
-import Runix.HTTP.Effects (HTTP)
-import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, restapiHTTP)
+import Runix.HTTP.Effects (HTTP, HTTPResponse(..))
+import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP)
 import Runix.Secret.Effects (Secret, getSecret)
-import UniversalLLM.Protocols.Anthropic (AnthropicRequest)
+import Runix.Streaming.SSE (reassembleSSE)
+import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicContentBlock(..))
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta)
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -85,6 +87,7 @@ interpretAnthropicAPIKey :: forall model provider r a.
                             , HasCodec (ProviderRequest provider)
                             , HasCodec (ProviderResponse provider)
                             , Monoid (ProviderRequest provider)
+                            , ProviderResponse provider ~ AnthropicResponse
                             , Members '[HTTP, Fail, Secret String] r
                             )
                          => provider -- ^ Provider value
@@ -102,15 +105,26 @@ interpretAnthropicAPIKey provider defaultModel action = do
                 let request = toProviderRequest provider defaultModel configs messages
                 let requestValue = toJSONViaCodec request
 
-                -- Make the API call
-                responseValue <- post (Endpoint "messages") requestValue
+                -- Check if streaming is enabled
+                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
 
-                -- Parse the response
-                case parseEither parseJSONViaCodec responseValue of
-                    Left err -> fail $ "Failed to parse Anthropic response: " ++ err
-                    Right providerResponse -> do
-                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                        return resultMessages
+                -- Make the API call and get typed response
+                providerResponse <- if useStreaming
+                    then do
+                        -- Streaming: reassemble SSE into typed response
+                        httpResp <- postStreaming (Endpoint "messages") requestValue
+                        let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+                        return $ reassembleSSE mergeAnthropicDelta (AnthropicSuccess emptyResp) (body httpResp)
+                    else do
+                        -- Non-streaming: parse JSON to typed response
+                        responseValue <- post (Endpoint "messages") requestValue
+                        case parseEither parseJSONViaCodec responseValue of
+                            Left err -> fail $ "Failed to parse Anthropic response: " ++ err
+                            Right resp -> return resp
+
+                -- Convert provider response to messages
+                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                return resultMessages
             ) action
     restapiHTTP api withRestAPI
 
@@ -133,9 +147,10 @@ interpretAnthropicOAuth :: forall provider model r a.
                            , HasCodec (ProviderRequest provider)
                            , HasCodec (ProviderResponse provider)
                            , ProviderRequest provider ~ AnthropicRequest
+                           , ProviderResponse provider ~ AnthropicResponse
                            , Members '[HTTP, Fail, Secret String] r
                            )
-                        => 
+                        =>
                         provider
                         -> model   -- ^ Default model
                         -> Sem (LLM provider model : r) a
@@ -153,15 +168,26 @@ interpretAnthropicOAuth provider defaultModel action = do
                 let request = withMagicSystemPrompt baseRequest
                 let requestValue = toJSONViaCodec request
 
-                -- Make the API call
-                responseValue <- post (Endpoint "messages") requestValue
+                -- Check if streaming is enabled
+                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
 
-                -- Parse the response
-                case parseEither parseJSONViaCodec responseValue of
-                    Left err -> fail $ "Failed to parse Anthropic response: " ++ err
-                    Right providerResponse -> do
-                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                        return resultMessages
+                -- Make the API call and get typed response
+                providerResponse <- if useStreaming
+                    then do
+                        -- Streaming: reassemble SSE into typed response
+                        httpResp <- postStreaming (Endpoint "messages") requestValue
+                        let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+                        return $ reassembleSSE mergeAnthropicDelta (AnthropicSuccess emptyResp) (body httpResp)
+                    else do
+                        -- Non-streaming: parse JSON to typed response
+                        responseValue <- post (Endpoint "messages") requestValue
+                        case parseEither parseJSONViaCodec responseValue of
+                            Left err -> fail $ "Failed to parse Anthropic response: " ++ err
+                            Right resp -> return resp
+
+                -- Convert provider response to messages
+                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -184,6 +210,7 @@ interpretOpenAI :: forall model provider r a.
                    , HasCodec (ProviderRequest provider)
                    , HasCodec (ProviderResponse provider)
                    , Monoid (ProviderRequest provider)
+                   , ProviderResponse provider ~ OpenAIResponse
                    , Members '[HTTP, Fail, Secret String] r
                    )
                 => provider -- ^ Provider value
@@ -201,15 +228,27 @@ interpretOpenAI provider defaultModel action = do
                 let request = toProviderRequest provider defaultModel configs messages
                 let requestValue = toJSONViaCodec request
 
-                -- Make the API call
-                responseValue <- post (Endpoint "chat/completions") requestValue
+                -- Check if streaming is enabled
+                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
 
-                -- Parse the response
-                case parseEither parseJSONViaCodec responseValue of
-                    Left err -> fail $ "Failed to parse OpenAI response: " ++ err
-                    Right providerResponse -> do
-                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                        return resultMessages
+                -- Make the API call and get typed response
+                providerResponse <- if useStreaming
+                    then do
+                        -- Streaming: reassemble SSE into typed response
+                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
+                        let emptyMsg = OpenAIMessage "assistant" Nothing Nothing Nothing Nothing
+                        let emptyResp = OpenAISuccessResponse [OpenAIChoice emptyMsg]
+                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
+                    else do
+                        -- Non-streaming: parse JSON to typed response
+                        responseValue <- post (Endpoint "chat/completions") requestValue
+                        case parseEither parseJSONViaCodec responseValue of
+                            Left err -> fail $ "Failed to parse OpenAI response: " ++ err
+                            Right resp -> return resp
+
+                -- Convert provider response to messages
+                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -233,6 +272,7 @@ interpretOpenRouter :: forall model provider r a.
                        , HasCodec (ProviderRequest provider)
                        , HasCodec (ProviderResponse provider)
                        , Monoid (ProviderRequest provider)
+                       , ProviderResponse provider ~ OpenAIResponse
                        , Members '[HTTP, Fail, Secret String] r
                        )
                     => provider -- ^ Provider value
@@ -250,15 +290,27 @@ interpretOpenRouter provider defaultModel action = do
                 let request = toProviderRequest provider defaultModel configs messages
                 let requestValue = toJSONViaCodec request
 
-                -- Make the API call
-                responseValue <- post (Endpoint "chat/completions") requestValue
+                -- Check if streaming is enabled
+                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
 
-                -- Parse the response
-                case parseEither parseJSONViaCodec responseValue of
-                    Left err -> fail $ "Failed to parse OpenRouter response: " ++ err
-                    Right providerResponse -> do
-                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                        return resultMessages
+                -- Make the API call and get typed response
+                providerResponse <- if useStreaming
+                    then do
+                        -- Streaming: reassemble SSE into typed response
+                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
+                        let emptyMsg = OpenAIMessage "assistant" Nothing Nothing Nothing Nothing
+                        let emptyResp = OpenAISuccessResponse [OpenAIChoice emptyMsg]
+                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
+                    else do
+                        -- Non-streaming: parse JSON to typed response
+                        responseValue <- post (Endpoint "chat/completions") requestValue
+                        case parseEither parseJSONViaCodec responseValue of
+                            Left err -> fail $ "Failed to parse OpenRouter response: " ++ err
+                            Right resp -> return resp
+
+                -- Convert provider response to messages
+                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -281,6 +333,7 @@ interpretLlamaCpp :: forall model provider r a.
                      , ModelName provider model
                      , HasCodec (ProviderRequest provider)
                      , HasCodec (ProviderResponse provider)
+                     , ProviderResponse provider ~ OpenAIResponse
                      , Members '[HTTP, Fail] r, Monoid (ProviderRequest provider)
                      )
                   => String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
@@ -298,14 +351,26 @@ interpretLlamaCpp endpoint p defaultModel action =
                 let request = toProviderRequest p defaultModel configs messages
                 let requestValue = toJSONViaCodec request
 
-                -- Make the API call
-                responseValue <- post (Endpoint "chat/completions") requestValue
+                -- Check if streaming is enabled
+                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
 
-                -- Parse the response
-                case parseEither parseJSONViaCodec responseValue of
-                    Left err -> fail $ "Failed to parse llama.cpp response: " ++ err
-                    Right providerResponse -> do
-                        let resultMessages = fromProviderResponse p defaultModel configs messages providerResponse
-                        return resultMessages
+                -- Make the API call and get typed response
+                providerResponse <- if useStreaming
+                    then do
+                        -- Streaming: reassemble SSE into typed response
+                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
+                        let emptyMsg = OpenAIMessage "assistant" Nothing Nothing Nothing Nothing
+                        let emptyResp = OpenAISuccessResponse [OpenAIChoice emptyMsg]
+                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
+                    else do
+                        -- Non-streaming: parse JSON to typed response
+                        responseValue <- post (Endpoint "chat/completions") requestValue
+                        case parseEither parseJSONViaCodec responseValue of
+                            Left err -> fail $ "Failed to parse llama.cpp response: " ++ err
+                            Right resp -> return resp
+
+                -- Convert provider response to messages
+                let resultMessages = fromProviderResponse p defaultModel configs messages providerResponse
+                return resultMessages
             ) action
     in restapiHTTP auth withRestAPI
