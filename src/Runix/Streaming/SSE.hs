@@ -43,7 +43,10 @@ extractTextFromChunk chunk =
     let chunkLazy = BSL.fromStrict chunk
         values = parseSSE chunkLazy
     in case values of
-        [] -> Nothing
+        [] ->
+            -- Debug: log when we can't parse SSE
+            -- trace ("DEBUG: parseSSE returned empty for chunk: " ++ show (BS.take 100 chunk))
+            Nothing
         (val:_) -> extractTextDelta val
   where
     extractTextDelta :: Value -> Maybe Text

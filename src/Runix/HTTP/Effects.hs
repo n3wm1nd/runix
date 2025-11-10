@@ -105,25 +105,31 @@ httpIO' requestTransform = interpret $ \case
         doneVar <- embed $ newEmptyTMVarIO
 
         -- Fork thread to fetch HTTP response and push chunks to queue
-        _ <- embed $ forkIO $ withResponse hr $ \resp -> do
-            let code = statusCode $ responseStatus resp
-            let headers = responseHeaders resp
+        _ <- embed $ forkIO $
+            CMC.catch
+                (withResponse hr $ \resp -> do
+                    let code = statusCode $ responseStatus resp
+                    let headers = responseHeaders resp
 
-            -- Stream chunks through conduit, pushing to queue
-            -- Each chunk is immediately pushed to the queue as it arrives
-            chunkList <- runConduit $ responseBody resp .| awaitForever (\chunk -> do
-                -- Push chunk to queue immediately (non-blocking)
-                lift $ do
-                    atomically $ writeTQueue chunkQueue (Just chunk)
-                    -- Force evaluation to ensure chunk is actually sent
-                    BS.length chunk `seq` return ()
-                yield chunk
-              ) .| sinkList
+                    -- Stream chunks through conduit, pushing to queue
+                    -- Each chunk is immediately pushed to the queue as it arrives
+                    chunkList <- runConduit $ responseBody resp .| awaitForever (\chunk -> do
+                        -- Push chunk to queue immediately (non-blocking)
+                        lift $ do
+                            atomically $ writeTQueue chunkQueue (Just chunk)
+                            -- Force evaluation to ensure chunk is actually sent
+                            BS.length chunk `seq` return ()
+                        yield chunk
+                      ) .| sinkList
 
-            -- Signal completion and send result
-            atomically $ do
-                writeTQueue chunkQueue Nothing  -- End marker
-                putTMVar doneVar (code, headers, chunkList)
+                    -- Signal completion and send result
+                    atomically $ do
+                        writeTQueue chunkQueue Nothing  -- End marker
+                        putTMVar doneVar (code, headers, chunkList))
+                (\(e :: CMC.SomeException) -> do
+                    -- Log the exception and signal error
+                    putStrLn $ "Streaming error: " ++ show e
+                    atomically $ writeTQueue chunkQueue Nothing)
 
         -- Main thread: consume queue and emit chunks in real-time
         let consumeChunks = do
