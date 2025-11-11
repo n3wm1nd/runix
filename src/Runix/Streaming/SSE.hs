@@ -13,6 +13,13 @@ import Data.Text (Text)
 import Control.Applicative ((<|>))
 import qualified Data.Vector as V
 
+-- | Streaming content that can be different types of chunks
+-- This will be extended in the future for other chunk types (tool calls, etc.)
+data StreamingContent
+  = StreamingText Text       -- ^ Regular assistant response text
+  | StreamingReasoning Text  -- ^ Reasoning/thinking content
+  deriving (Show, Eq)
+
 -- | Parse Server-Sent Events (SSE) format
 -- Returns a list of JSON values from "data: {...}" lines
 parseSSE :: ByteString -> [Value]
@@ -36,41 +43,63 @@ reassembleSSE deltaMerger initial sseBody =
     let chunks = parseSSE sseBody
     in foldl deltaMerger initial chunks
 
--- | Extract text delta from a ByteString chunk (for streaming preview)
--- Parses SSE format and extracts text from both Anthropic and OpenAI streaming formats
-extractTextFromChunk :: BS.ByteString -> Maybe Text
-extractTextFromChunk chunk =
+-- | Extract streaming content from a ByteString chunk (for streaming preview)
+-- Parses SSE format and extracts text/reasoning from both Anthropic and OpenAI streaming formats
+extractContentFromChunk :: BS.ByteString -> Maybe StreamingContent
+extractContentFromChunk chunk =
     let chunkLazy = BSL.fromStrict chunk
         values = parseSSE chunkLazy
     in case values of
-        [] ->
-            -- Debug: log when we can't parse SSE
-            -- trace ("DEBUG: parseSSE returned empty for chunk: " ++ show (BS.take 100 chunk))
-            Nothing
-        (val:_) -> extractTextDelta val
+        [] -> Nothing
+        (val:_) -> extractContentDelta val
   where
-    extractTextDelta :: Value -> Maybe Text
-    extractTextDelta (Aeson.Object obj) = do
+    extractContentDelta :: Value -> Maybe StreamingContent
+    extractContentDelta (Aeson.Object obj) = do
         -- Try Anthropic format first (content_block_delta)
         let anthropicResult = do
                 Aeson.String eventType <- KM.lookup "type" obj
                 if eventType == "content_block_delta"
                     then do
                         Aeson.Object delta <- KM.lookup "delta" obj
-                        Aeson.String text <- KM.lookup "text" delta
-                        return text
+                        -- Check if it's a thinking delta
+                        let thinkingResult = do
+                                Aeson.String deltaType <- KM.lookup "type" delta
+                                if deltaType == "thinking_delta"
+                                    then do
+                                        Aeson.String thinking <- KM.lookup "thinking" delta
+                                        return $ StreamingReasoning thinking
+                                    else Nothing
+                        -- Otherwise try regular text delta
+                        let textResult = do
+                                Aeson.String text <- KM.lookup "text" delta
+                                return $ StreamingText text
+                        thinkingResult <|> textResult
                     else Nothing
 
-        -- Try OpenAI format (choices[0].delta.content)
+        -- Try OpenAI format (choices[0].delta.content or choices[0].delta.reasoning_content)
         let openaiResult = do
                 Aeson.Array choices <- KM.lookup "choices" obj
                 choice <- choices V.!? 0
                 case choice of
                     Aeson.Object choiceObj -> do
                         Aeson.Object delta <- KM.lookup "delta" choiceObj
-                        Aeson.String content <- KM.lookup "content" delta
-                        return content
+                        -- Try reasoning_content first
+                        let reasoningResult = do
+                                Aeson.String reasoning <- KM.lookup "reasoning_content" delta
+                                return $ StreamingReasoning reasoning
+                        -- Otherwise try regular content
+                        let contentResult = do
+                                Aeson.String content <- KM.lookup "content" delta
+                                return $ StreamingText content
+                        reasoningResult <|> contentResult
                     _ -> Nothing
 
         anthropicResult <|> openaiResult
-    extractTextDelta _ = Nothing
+    extractContentDelta _ = Nothing
+
+-- | Legacy function for backwards compatibility
+-- Extract just text (ignoring reasoning chunks)
+extractTextFromChunk :: BS.ByteString -> Maybe Text
+extractTextFromChunk chunk = case extractContentFromChunk chunk of
+    Just (StreamingText text) -> Just text
+    _ -> Nothing
