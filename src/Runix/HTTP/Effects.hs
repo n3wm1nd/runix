@@ -125,11 +125,12 @@ httpIO' requestTransform = interpret $ \case
                     -- Signal completion and send result
                     atomically $ do
                         writeTQueue chunkQueue Nothing  -- End marker
-                        putTMVar doneVar (code, headers, chunkList))
+                        putTMVar doneVar (Right (code, headers, chunkList)))
                 (\(e :: CMC.SomeException) -> do
-                    -- Log the exception and signal error
-                    putStrLn $ "Streaming error: " ++ show e
-                    atomically $ writeTQueue chunkQueue Nothing)
+                    -- Signal error to main thread
+                    atomically $ do
+                        writeTQueue chunkQueue Nothing  -- End marker
+                        putTMVar doneVar (Left $ show e))
 
         -- Main thread: consume queue and emit chunks in real-time
         let consumeChunks = do
@@ -143,15 +144,17 @@ httpIO' requestTransform = interpret $ \case
         consumeChunks
 
         -- Wait for thread to finish and get result
-        (respCode, respHeaders, chunks) <- embed $ atomically $ takeTMVar doneVar
+        result <- embed $ atomically $ takeTMVar doneVar
 
-        let completeBody = BSL.fromChunks chunks
-
-        return $ HTTPResponse
-            { code = respCode
-            , headers = map (\(hn, b) -> (show hn, show b)) respHeaders
-            , body = completeBody
-            }
+        case result of
+            Left err -> fail $ "HTTP streaming error: " ++ err
+            Right (respCode, respHeaders, chunks) -> do
+                let completeBody = BSL.fromChunks chunks
+                return $ HTTPResponse
+                    { code = respCode
+                    , headers = map (\(hn, b) -> (show hn, show b)) respHeaders
+                    , body = completeBody
+                    }
 
 -- | Backward-compatible HTTP interpreter (no streaming chunks emitted)
 -- This is the original httpIO signature that existing code expects
