@@ -46,7 +46,7 @@ import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreamin
 import Runix.Secret.Effects (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
 import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicContentBlock(..))
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), OpenAIErrorResponse(..), OpenAIErrorDetail(..), mergeOpenAIDelta)
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -246,9 +246,14 @@ interpretOpenAI provider defaultModel action = do
                             Left err -> fail $ "Failed to parse OpenAI response: " ++ err
                             Right resp -> return resp
 
-                -- Convert provider response to messages
-                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                return resultMessages
+                -- Check for error response before parsing
+                case providerResponse of
+                    OpenAIError (OpenAIErrorResponse errDetail) ->
+                        fail $ "OpenAI API error: " ++ show (errorMessage errDetail)
+                    OpenAISuccess _ -> do
+                        -- Convert provider response to messages
+                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -308,9 +313,14 @@ interpretOpenRouter provider defaultModel action = do
                             Left err -> fail $ "Failed to parse OpenRouter response: " ++ err
                             Right resp -> return resp
 
-                -- Convert provider response to messages
-                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
-                return resultMessages
+                -- Check for error response before parsing
+                case providerResponse of
+                    OpenAIError (OpenAIErrorResponse errDetail) ->
+                        fail $ "OpenRouter API error: " ++ show (errorMessage errDetail)
+                    OpenAISuccess _ -> do
+                        -- Convert provider response to messages
+                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -369,8 +379,13 @@ interpretLlamaCpp endpoint p defaultModel action =
                             Left err -> fail $ "Failed to parse llama.cpp response: " ++ err
                             Right resp -> return resp
 
-                -- Convert provider response to messages
-                let resultMessages = fromProviderResponse p defaultModel configs messages providerResponse
-                return resultMessages
+                -- Check for error response before parsing
+                case providerResponse of
+                    OpenAIError (OpenAIErrorResponse errDetail) ->
+                        fail $ "llama.cpp API error: " ++ show (errorMessage errDetail)
+                    OpenAISuccess _ -> do
+                        -- Convert provider response to messages
+                        let resultMessages = fromProviderResponse p defaultModel configs messages providerResponse
+                        return resultMessages
             ) action
     in restapiHTTP auth withRestAPI
