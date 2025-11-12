@@ -9,7 +9,9 @@ module Runix.LLM.ToolExecution
   ) where
 
 import Polysemy
-import Data.Text ()  -- Import only instances
+import Polysemy.Fail (Fail, runFail)
+import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.Aeson as Aeson
@@ -20,9 +22,10 @@ import Runix.Logging.Effects (Logging, info, warning)
 
 -- | Execute a tool call with automatic logging
 -- Logs tool name, arguments, and results
+-- Tools have access to the Fail effect - failures are converted to error results
 executeTool
   :: Member Logging r
-  => [LLMTool (Sem r)]
+  => [LLMTool (Sem (Fail ': r))]
   -> ToolCall
   -> Sem r ToolResult
 executeTool tools tc = do
@@ -34,8 +37,16 @@ executeTool tools tc = do
     InvalidToolCall _ name _rawArgs err -> do
       warning $ name <> " [INVALID: " <> err <> "]"
 
-  -- Execute the tool
-  result <- executeToolCallFromList tools tc
+  -- Execute the tool with Fail available, then interpret Fail into error results
+  failResult <- runFail $ executeToolCallFromList tools tc
+
+  let result = case failResult of
+        Left errMsg ->
+          -- Tool called fail - convert to error result
+          ToolResult tc (Left (T.pack errMsg))
+        Right toolResult ->
+          -- Tool succeeded normally
+          toolResult
 
   -- Log the result
   case toolResultOutput result of
