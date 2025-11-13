@@ -11,8 +11,8 @@
 module Runix.FileSystem.Effects where
 import Data.Kind (Type)
 import Polysemy
-import Data.ByteString.Lazy (ByteString)
-import qualified Data.ByteString.Lazy as BL
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Prelude hiding (readFile, writeFile)
 import Polysemy.Fail
 import System.FilePath
@@ -136,7 +136,7 @@ filesystemReadIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSy
 filesystemReadIO = interpret $ \case
     ReadFile p -> do
         info $ fromString "reading file: " <> fromString p
-        embed $ BL.readFile p
+        embed $ BS.readFile p
     ListFiles p -> do
         info $ fromString "listing files: " <> fromString p
         embed $ System.Directory.listDirectory p
@@ -160,7 +160,7 @@ filesystemWriteIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileS
 filesystemWriteIO = interpret $ \case
     WriteFile p d -> do
         info $ fromString "writing file: " <> fromString p
-        embed $ BL.writeFile p d
+        embed $ BS.writeFile p d
 
 -- | Combined IO interpreter for backwards compatibility
 -- Interprets both FileSystemRead and FileSystemWrite
