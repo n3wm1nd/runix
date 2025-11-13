@@ -28,19 +28,23 @@ data CmdOutput = CmdOutput
 -- This does not evaluate shell syntax (pipes, redirects, etc.)
 -- It directly executes a command with its arguments
 data Cmd (m :: Type -> Type) a where
-    -- Execute a command with arguments
-    CmdExec :: FilePath -> [String] -> Cmd m CmdOutput
+    -- Execute a command with arguments in a specific working directory
+    CmdExecIn :: FilePath -> FilePath -> [String] -> Cmd m CmdOutput
 
 makeSem ''Cmd
 
--- | IO interpreter for Cmd effect
+-- | Compatibility function - execute in current working directory
+cmdExec :: Member Cmd r => FilePath -> [String] -> Sem r CmdOutput
+cmdExec prog args = cmdExecIn "." prog args
+
 cmdIO :: Member (Embed IO) r => Sem (Cmd : r) a -> Sem r a
 cmdIO = interpret $ \case
-    CmdExec prog args -> embed $ runCommand prog args
+    CmdExecIn cwd prog args -> embed $ runCommandIn cwd prog args
   where
-    runCommand :: FilePath -> [String] -> IO CmdOutput
-    runCommand prog args = do
-        (exitCode, stdout, stderr) <- Process.readProcessWithExitCode prog args ""
+    runCommandIn :: FilePath -> FilePath -> [String] -> IO CmdOutput
+    runCommandIn cwd prog args = do
+        let process = (Process.proc prog args) { Process.cwd = Just cwd }
+        (exitCode, stdout, stderr) <- Process.readCreateProcessWithExitCode process ""
         let code = case exitCode of
                 ExitSuccess -> 0
                 ExitFailure c -> c
