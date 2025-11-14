@@ -79,7 +79,8 @@ library
         Runix.Compiler.Effects,
         Runix.Runners.CLI.Single,
         Runix.Runners.CLI.Multi,
-        Runix.Runners.CLI.Chat
+        Runix.Runners.CLI.Chat,
+        Runix.Cancellation.Effects
 
 
     -- Modules included in this library but not exported.

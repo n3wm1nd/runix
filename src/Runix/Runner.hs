@@ -46,6 +46,7 @@ import Runix.HTTP.Effects
 import Runix.Logging.Effects
 import Runix.Secret.Effects
 import Runix.Compiler.Effects
+import Runix.Cancellation.Effects (Cancellation, cancelNoop)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
 import Runix.LLM.Effects
@@ -83,7 +84,7 @@ compileTaskIO = interpret $ \case
 
 -- | Example OpenRouter interpreter using environment variable
 -- This demonstrates how to compose the various effect interpreters
-openrouter :: Members [Embed IO, Fail, HTTP] r => Sem (LLM OpenRouter GenericModel : r) a -> Sem r a
+openrouter :: Members [Embed IO, Fail, HTTP, Cancellation] r => Sem (LLM OpenRouter GenericModel : r) a -> Sem r a
 openrouter action = do
     apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
     case apiKey of
@@ -97,5 +98,5 @@ openrouter action = do
 -- | Example runner combining all effect interpreters
 -- This demonstrates the complete effect stack composition
 runUntrusted :: HasCallStack => (forall r . Members (SafeEffects OpenRouter GenericModel) r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . httpIO_ . filesystemIO . openrouter . compileTaskIO
+runUntrusted = runM . runError . loggingIO . failLog . cancelNoop . httpIO_ . filesystemIO . openrouter . compileTaskIO
 
