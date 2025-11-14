@@ -46,7 +46,7 @@ import Runix.HTTP.Effects
 import Runix.Logging.Effects
 import Runix.Secret.Effects
 import Runix.Compiler.Effects
-import Runix.Cancellation.Effects (Cancellation, cancelNoop)
+import Runix.Cancellation.Effects (Cancellation, cancelNoop, onCancellation)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
 import Runix.LLM.Effects

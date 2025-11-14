@@ -11,6 +11,7 @@ module Runix.Cancellation.Effects
   ( Cancellation(..)
   , isCanceled
   , cancelNoop
+  , onCancellation
   ) where
 
 import Prelude
@@ -33,3 +34,11 @@ makeSem ''Cancellation
 cancelNoop :: Sem (Cancellation : r) a -> Sem r a
 cancelNoop = interpret $ \case
   IsCanceled -> return False
+
+-- | Run an action with a default fallback value if cancellation is requested
+-- If isCanceled returns True, returns the default value
+-- Otherwise, runs the action
+onCancellation :: Member Cancellation r => a -> Sem r a -> Sem r a
+onCancellation defaultValue action = do
+  canceled <- isCanceled
+  if canceled then return defaultValue else action
