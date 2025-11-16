@@ -128,7 +128,8 @@ interpretAnthropicAPIKey provider defaultModel action = do
                             Right resp -> return resp
 
                 -- Convert provider response to messages
-                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
+                -- TODO: Thread provider/model updates through the interpreter state
                 return resultMessages
             ) action
     restapiHTTP api withRestAPI
@@ -199,7 +200,8 @@ interpretAnthropicOAuth provider defaultModel action = do
                             Right resp -> return resp
 
                 -- Convert provider response to messages
-                let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
+                -- TODO: Thread provider/model updates through the interpreter state
                 return resultMessages
             ) action
     restapiHTTP auth withRestAPI
@@ -265,7 +267,8 @@ interpretOpenAI provider defaultModel action = do
                         fail $ "OpenAI API error: " ++ show (errorMessage errDetail)
                     OpenAISuccess _ -> do
                         -- Convert provider response to messages
-                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
+                        -- TODO: Thread provider/model updates through the interpreter state
                         return resultMessages
             ) action
     restapiHTTP auth withRestAPI
@@ -332,7 +335,8 @@ interpretOpenRouter provider defaultModel action = do
                         fail $ "OpenRouter API error: " ++ show (errorMessage errDetail)
                     OpenAISuccess _ -> do
                         -- Convert provider response to messages
-                        let resultMessages = fromProviderResponse provider defaultModel configs messages providerResponse
+                        let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
+                        -- TODO: Thread provider/model updates through the interpreter state
                         return resultMessages
             ) action
     restapiHTTP auth withRestAPI
@@ -398,7 +402,8 @@ interpretLlamaCpp endpoint p defaultModel action =
                         fail $ "llama.cpp API error: " ++ show (errorMessage errDetail)
                     OpenAISuccess _ -> do
                         -- Convert provider response to messages
-                        let resultMessages = fromProviderResponse p defaultModel configs messages providerResponse
+                        let (_provider', _model', resultMessages) = fromProviderResponse p defaultModel configs messages providerResponse
+                        -- TODO: Thread provider/model updates through the interpreter state
                         return resultMessages
             ) action
     in restapiHTTP auth withRestAPI
