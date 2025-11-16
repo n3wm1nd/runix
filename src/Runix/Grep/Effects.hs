@@ -17,6 +17,7 @@ import Data.String (fromString)
 import Data.Maybe (mapMaybe)
 import Control.Monad (filterM)
 import Polysemy
+import Polysemy.Fail (Fail)
 import GHC.Stack
 import Runix.Cmd.Effects (Cmd, cmdExec)
 import qualified Runix.Cmd.Effects as CmdE
@@ -38,7 +39,7 @@ data Grep (m :: Type -> Type) a where
 makeSem ''Grep
 
 -- | Grep interpreter using ripgrep
-grepIO :: HasCallStack => Members [Cmd, Logging, FileSystemRead] r => Sem (Grep : r) a -> Sem r a
+grepIO :: HasCallStack => Members [Cmd, Logging, FileSystemRead, Fail] r => Sem (Grep : r) a -> Sem r a
 grepIO = interpret $ \case
     GrepSearch basePath pattern -> do
         info $ fromString "grep search: " <> fromString pattern <> fromString " in " <> fromString basePath
