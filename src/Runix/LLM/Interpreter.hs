@@ -32,7 +32,8 @@ module Runix.LLM.Interpreter
 
 import Polysemy
 import Polysemy.Fail
-import Data.Aeson ()  -- Import only instances
+import Data.Aeson (toJSON)  -- Import for error response parsing
+import Data.ByteString.Lazy (fromStrict)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
@@ -44,6 +45,7 @@ import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
 import Runix.LLM.Effects (LLM(..), getModel, queryLLM)
 import Runix.HTTP.Effects (HTTP, HTTPResponse(..))
+import qualified Runix.HTTP.Effects as HTTPEff
 import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP)
 import Runix.Secret.Effects (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
@@ -179,8 +181,16 @@ interpretAnthropicOAuth provider defaultModel action = do
                     then do
                         -- Streaming: reassemble SSE into typed response
                         httpResp <- postStreaming (Endpoint "messages") requestValue
-                        let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
-                        return $ reassembleSSE mergeAnthropicDelta (AnthropicSuccess emptyResp) (body httpResp)
+                        -- Check HTTP status code for streaming responses
+                        let respCode = Runix.HTTP.Effects.code httpResp
+                            respBody = Runix.HTTP.Effects.body httpResp
+                        if respCode >= 200 && respCode < 300
+                          then do
+                            let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+                            return $ reassembleSSE mergeAnthropicDelta (AnthropicSuccess emptyResp) respBody
+                          else do
+                            -- For error responses, just return an error without parsing SSE
+                            fail $ "HTTP error " ++ show respCode ++ ": " ++ show respBody
                     else do
                         -- Non-streaming: parse JSON to typed response
                         responseValue <- post (Endpoint "messages") requestValue
