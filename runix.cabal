@@ -108,7 +108,8 @@ test-suite runix-test
     default-language: Haskell2010
 
     -- Modules included in this executable, other than Main.
-    -- other-modules:
+    other-modules:    Paths_runix
+    autogen-modules:  Paths_runix
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -124,7 +125,17 @@ test-suite runix-test
 
     -- Test dependencies.
     build-depends:
-        base, 
+        base,
         runix,
         text,
-        polysemy
+        polysemy,
+        polysemy-plugin,
+        bytestring,
+        aeson,
+        autodocodec,
+        universal-llm,
+        hspec,
+        process,
+        directory,
+        conduit,
+        http-client-conduit
