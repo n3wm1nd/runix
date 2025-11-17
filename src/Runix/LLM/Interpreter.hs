@@ -32,6 +32,7 @@ module Runix.LLM.Interpreter
 
 import Polysemy
 import Polysemy.Fail
+import Polysemy.State (State, evalState, get, put)
 import Data.Aeson (toJSON)  -- Import for error response parsing
 import Data.ByteString.Lazy (fromStrict)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
@@ -43,7 +44,7 @@ import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
-import Runix.LLM.Effects (LLM(..), getModel, queryLLM)
+import Runix.LLM.Effects (LLM(..), queryLLM)
 import Runix.HTTP.Effects (HTTP, HTTPResponse(..))
 import qualified Runix.HTTP.Effects as HTTPEff
 import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP)
@@ -86,28 +87,28 @@ instance RestEndpoint AnthropicAPIKeyAuth where
         , ("Content-Type", "application/json")
         ]
 
-interpretAnthropicAPIKey :: forall model provider r a.
+-- Internal version with state management
+interpretAnthropicAPIKeyWithState :: forall model provider r a.
                             ( ProviderImplementation provider model
                             , ModelName provider model
                             , HasCodec (ProviderRequest provider)
                             , HasCodec (ProviderResponse provider)
                             , Monoid (ProviderRequest provider)
                             , ProviderResponse provider ~ AnthropicResponse
-                            , Members '[HTTP, Fail, Secret String] r
+                            , Members '[HTTP, Fail, Secret String, State (provider, model)] r
                             )
-                         => provider -- ^ Provider value
-                         -> model   -- ^ Default model
-                         -> Sem (LLM provider model : r) a
+                         => Sem (LLM provider model : r) a
                          -> Sem r a
-interpretAnthropicAPIKey provider defaultModel action = do
+interpretAnthropicAPIKeyWithState action = do
     apiKey <- getSecret
     let api = AnthropicAPIKeyAuth apiKey
         withRestAPI = reinterpret (\case
-            GetModel -> return defaultModel
-
             QueryLLM configs messages -> do
+                -- Get current provider/model from state
+                (provider, model) <- get
+
                 -- Use universal-llm to build the request
-                let request = toProviderRequest provider defaultModel configs messages
+                let request = toProviderRequest provider model configs messages
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
@@ -128,11 +129,29 @@ interpretAnthropicAPIKey provider defaultModel action = do
                             Right resp -> return resp
 
                 -- Convert provider response to messages
-                let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
-                -- TODO: Thread provider/model updates through the interpreter state
+                let (provider', model', resultMessages) = fromProviderResponse provider model configs messages providerResponse
+                -- Update state with new provider/model
+                put (provider', model')
                 return resultMessages
             ) action
     restapiHTTP api withRestAPI
+
+-- Public wrapper for backward compatibility
+interpretAnthropicAPIKey :: forall model provider r a.
+                            ( ProviderImplementation provider model
+                            , ModelName provider model
+                            , HasCodec (ProviderRequest provider)
+                            , HasCodec (ProviderResponse provider)
+                            , Monoid (ProviderRequest provider)
+                            , ProviderResponse provider ~ AnthropicResponse
+                            , Members '[HTTP, Fail, Secret String] r
+                            )
+                         => provider -- ^ Provider value
+                         -> model   -- ^ Model value
+                         -> Sem (LLM provider model : r) a
+                         -> Sem r a
+interpretAnthropicAPIKey provider model action =
+    evalState (provider, model) . interpretAnthropicAPIKeyWithState . raiseUnder $ action
 
 -- Anthropic OAuth Authentication (for Claude Code)
 data AnthropicOAuthAuth = AnthropicOAuthAuth { anthropicOAuthToken :: String }
@@ -147,29 +166,28 @@ instance RestEndpoint AnthropicOAuthAuth where
         , ("User-Agent", "hs-universal-llm (prerelease-dev)")
         ]
 
-interpretAnthropicOAuth :: forall provider model r a.
+-- Internal version with state management
+interpretAnthropicOAuthWithState :: forall provider model r a.
                            ( ProviderImplementation provider model
                            , ModelName provider model
                            , HasCodec (ProviderRequest provider)
                            , HasCodec (ProviderResponse provider)
                            , ProviderRequest provider ~ AnthropicRequest
                            , ProviderResponse provider ~ AnthropicResponse
-                           , Members '[HTTP, Fail, Secret String] r
+                           , Members '[HTTP, Fail, Secret String, State (provider, model)] r
                            )
-                        =>
-                        provider
-                        -> model   -- ^ Default model
-                        -> Sem (LLM provider model : r) a
+                        => Sem (LLM provider model : r) a
                         -> Sem r a
-interpretAnthropicOAuth provider defaultModel action = do
+interpretAnthropicOAuthWithState action = do
     oauthToken <- getSecret
     let auth = AnthropicOAuthAuth oauthToken
         withRestAPI = reinterpret (\case
-            GetModel -> return defaultModel
-
             QueryLLM configs messages -> do
+                -- Get current provider/model from state
+                (provider, model) <- get
+
                 -- Use universal-llm to build the request with magic system prompt
-                let baseRequest = toProviderRequest provider defaultModel configs messages
+                let baseRequest = toProviderRequest provider model configs messages
                 -- Add the magic system prompt for OAuth
                 let request = withMagicSystemPrompt baseRequest
                 let requestValue = toJSONViaCodec request
@@ -200,11 +218,29 @@ interpretAnthropicOAuth provider defaultModel action = do
                             Right resp -> return resp
 
                 -- Convert provider response to messages
-                let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
-                -- TODO: Thread provider/model updates through the interpreter state
+                let (provider', model', resultMessages) = fromProviderResponse provider model configs messages providerResponse
+                -- Update state with new provider/model
+                put (provider', model')
                 return resultMessages
             ) action
     restapiHTTP auth withRestAPI
+
+-- Public wrapper for backward compatibility
+interpretAnthropicOAuth :: forall provider model r a.
+                           ( ProviderImplementation provider model
+                           , ModelName provider model
+                           , HasCodec (ProviderRequest provider)
+                           , HasCodec (ProviderResponse provider)
+                           , ProviderRequest provider ~ AnthropicRequest
+                           , ProviderResponse provider ~ AnthropicResponse
+                           , Members '[HTTP, Fail, Secret String] r
+                           )
+                        => provider
+                        -> model
+                        -> Sem (LLM provider model : r) a
+                        -> Sem r a
+interpretAnthropicOAuth provider model action =
+    evalState (provider, model) . interpretAnthropicOAuthWithState . raiseUnder $ action
 
 -- ============================================================================
 -- OpenAI Interpreter
@@ -219,28 +255,28 @@ instance RestEndpoint OpenAIAuth where
         , ("Content-Type", "application/json")
         ]
 
-interpretOpenAI :: forall model provider r a.
+-- Internal version with state management
+interpretOpenAIWithState :: forall model provider r a.
                    ( ProviderImplementation provider model
                    , ModelName provider model
                    , HasCodec (ProviderRequest provider)
                    , HasCodec (ProviderResponse provider)
                    , Monoid (ProviderRequest provider)
                    , ProviderResponse provider ~ OpenAIResponse
-                   , Members '[HTTP, Fail, Secret String] r
+                   , Members '[HTTP, Fail, Secret String, State (provider, model)] r
                    )
-                => provider -- ^ Provider value
-                -> model   -- ^ Default model
-                -> Sem (LLM provider model : r) a
+                => Sem (LLM provider model : r) a
                 -> Sem r a
-interpretOpenAI provider defaultModel action = do
+interpretOpenAIWithState action = do
     apiKey <- getSecret
     let auth = OpenAIAuth apiKey
         withRestAPI = reinterpret (\case
-            GetModel -> return defaultModel
-
             QueryLLM configs messages -> do
+                -- Get current provider/model from state
+                (provider, model) <- get
+
                 -- Use universal-llm to build the request
-                let request = toProviderRequest provider defaultModel configs messages
+                let request = toProviderRequest provider model configs messages
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
@@ -267,11 +303,29 @@ interpretOpenAI provider defaultModel action = do
                         fail $ "OpenAI API error: " ++ show (errorMessage errDetail)
                     OpenAISuccess _ -> do
                         -- Convert provider response to messages
-                        let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
-                        -- TODO: Thread provider/model updates through the interpreter state
+                        let (provider', model', resultMessages) = fromProviderResponse provider model configs messages providerResponse
+                        -- Update state with new provider/model
+                        put (provider', model')
                         return resultMessages
             ) action
     restapiHTTP auth withRestAPI
+
+-- Public wrapper for backward compatibility
+interpretOpenAI :: forall model provider r a.
+                   ( ProviderImplementation provider model
+                   , ModelName provider model
+                   , HasCodec (ProviderRequest provider)
+                   , HasCodec (ProviderResponse provider)
+                   , Monoid (ProviderRequest provider)
+                   , ProviderResponse provider ~ OpenAIResponse
+                   , Members '[HTTP, Fail, Secret String] r
+                   )
+                => provider -- ^ Provider value
+                -> model   -- ^ Model value
+                -> Sem (LLM provider model : r) a
+                -> Sem r a
+interpretOpenAI provider model action =
+    evalState (provider, model) . interpretOpenAIWithState . raiseUnder $ action
 
 -- ============================================================================
 -- OpenRouter Interpreter
@@ -287,28 +341,28 @@ instance RestEndpoint OpenRouterAuth where
         , ("Content-Type", "application/json")
         ]
 
-interpretOpenRouter :: forall model provider r a.
+-- Internal version with state management
+interpretOpenRouterWithState :: forall model provider r a.
                        ( ProviderImplementation provider model
                        , ModelName provider model
                        , HasCodec (ProviderRequest provider)
                        , HasCodec (ProviderResponse provider)
                        , Monoid (ProviderRequest provider)
                        , ProviderResponse provider ~ OpenAIResponse
-                       , Members '[HTTP, Fail, Secret String] r
+                       , Members '[HTTP, Fail, Secret String, State (provider, model)] r
                        )
-                    => provider -- ^ Provider value
-                    -> model   -- ^ Default model
-                    -> Sem (LLM provider model : r) a
+                    => Sem (LLM provider model : r) a
                     -> Sem r a
-interpretOpenRouter provider defaultModel action = do
+interpretOpenRouterWithState action = do
     apiKey <- getSecret
     let auth = OpenRouterAuth apiKey
         withRestAPI = reinterpret (\case
-            GetModel -> return defaultModel
-
             QueryLLM configs messages -> do
+                -- Get current provider/model from state
+                (provider, model) <- get
+
                 -- Use universal-llm to build the request
-                let request = toProviderRequest provider defaultModel configs messages
+                let request = toProviderRequest provider model configs messages
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
@@ -335,11 +389,29 @@ interpretOpenRouter provider defaultModel action = do
                         fail $ "OpenRouter API error: " ++ show (errorMessage errDetail)
                     OpenAISuccess _ -> do
                         -- Convert provider response to messages
-                        let (_provider', _model', resultMessages) = fromProviderResponse provider defaultModel configs messages providerResponse
-                        -- TODO: Thread provider/model updates through the interpreter state
+                        let (provider', model', resultMessages) = fromProviderResponse provider model configs messages providerResponse
+                        -- Update state with new provider/model
+                        put (provider', model')
                         return resultMessages
             ) action
     restapiHTTP auth withRestAPI
+
+-- Public wrapper for backward compatibility
+interpretOpenRouter :: forall model provider r a.
+                       ( ProviderImplementation provider model
+                       , ModelName provider model
+                       , HasCodec (ProviderRequest provider)
+                       , HasCodec (ProviderResponse provider)
+                       , Monoid (ProviderRequest provider)
+                       , ProviderResponse provider ~ OpenAIResponse
+                       , Members '[HTTP, Fail, Secret String] r
+                       )
+                    => provider -- ^ Provider value
+                    -> model   -- ^ Model value
+                    -> Sem (LLM provider model : r) a
+                    -> Sem r a
+interpretOpenRouter provider model action =
+    evalState (provider, model) . interpretOpenRouterWithState . raiseUnder $ action
 
 -- ============================================================================
 -- Llama.cpp Interpreter
@@ -354,28 +426,27 @@ instance RestEndpoint LlamaCppAuth where
     apiroot = llamacppEndpoint
     authheaders _ = [("Content-Type", "application/json")]
 
--- Llama.cpp uses OpenAI protocol internally
-interpretLlamaCpp :: forall model provider r a.
+-- Internal version with state management
+interpretLlamaCppWithState :: forall model provider r a.
                      ( ProviderImplementation provider model
                      , ModelName provider model
                      , HasCodec (ProviderRequest provider)
                      , HasCodec (ProviderResponse provider)
                      , ProviderResponse provider ~ OpenAIResponse
-                     , Members '[HTTP, Fail] r, Monoid (ProviderRequest provider)
+                     , Members '[HTTP, Fail, State (provider, model)] r, Monoid (ProviderRequest provider)
                      )
                   => String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
-                  -> provider
-                  -> model   -- ^ Default model
                   -> Sem (LLM provider model : r) a
                   -> Sem r a
-interpretLlamaCpp endpoint p defaultModel action =
+interpretLlamaCppWithState endpoint action =
     let auth = LlamaCppAuth endpoint
         withRestAPI = reinterpret (\case
-            GetModel -> return defaultModel
-
             QueryLLM configs messages -> do
+                -- Get current provider/model from state
+                (provider, model) <- get
+
                 -- Use universal-llm with LlamaCpp (which uses OpenAI protocol)
-                let request = toProviderRequest p defaultModel configs messages
+                let request = toProviderRequest provider model configs messages
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
@@ -402,11 +473,30 @@ interpretLlamaCpp endpoint p defaultModel action =
                         fail $ "llama.cpp API error: " ++ show (errorMessage errDetail)
                     OpenAISuccess _ -> do
                         -- Convert provider response to messages
-                        let (_provider', _model', resultMessages) = fromProviderResponse p defaultModel configs messages providerResponse
-                        -- TODO: Thread provider/model updates through the interpreter state
+                        let (provider', model', resultMessages) = fromProviderResponse provider model configs messages providerResponse
+                        -- Update state with new provider/model
+                        put (provider', model')
                         return resultMessages
             ) action
     in restapiHTTP auth withRestAPI
+
+-- Public wrapper for backward compatibility
+-- Llama.cpp uses OpenAI protocol internally
+interpretLlamaCpp :: forall model provider r a.
+                     ( ProviderImplementation provider model
+                     , ModelName provider model
+                     , HasCodec (ProviderRequest provider)
+                     , HasCodec (ProviderResponse provider)
+                     , ProviderResponse provider ~ OpenAIResponse
+                     , Members '[HTTP, Fail] r, Monoid (ProviderRequest provider)
+                     )
+                  => String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
+                  -> provider
+                  -> model   -- ^ Model value
+                  -> Sem (LLM provider model : r) a
+                  -> Sem r a
+interpretLlamaCpp endpoint provider model action =
+    evalState (provider, model) . interpretLlamaCppWithState endpoint . raiseUnder $ action
 
 -- ============================================================================
 -- Cancellable Wrapper
@@ -419,6 +509,5 @@ withLLMCancellation :: forall provider model r a.
                     => Sem (LLM provider model : r) a
                     -> Sem (LLM provider model : r) a
 withLLMCancellation action = reinterpret (\case
-    GetModel -> getModel
     QueryLLM configs messages -> onCancellation [] (queryLLM configs messages)
     ) action

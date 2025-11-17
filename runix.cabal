@@ -109,6 +109,7 @@ test-suite runix-test
 
     -- Modules included in this executable, other than Main.
     other-modules:    Paths_runix
+                    , OpenAIStreamingSpec
     autogen-modules:  Paths_runix
 
     -- LANGUAGE extensions used by modules in this package.

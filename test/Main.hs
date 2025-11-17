@@ -34,6 +34,7 @@ import Runix.Logging.Effects (Logging, loggingNull)
 import Runix.Secret.Effects (runSecret)
 import Runix.Cancellation.Effects (cancelNoop)
 import Runix.Streaming.Effects (ignoreChunks)
+import qualified OpenAIStreamingSpec
 
 -- ============================================================================
 -- Test Models
@@ -48,7 +49,7 @@ instance HasTools ClaudeSonnet45 Anthropic where
   withTools = Provider.anthropicWithTools
 
 instance ProviderImplementation Anthropic ClaudeSonnet45 where
-  getComposableProvider = Provider.ensureUserFirst . withTools $ Provider.baseComposableProvider
+  getComposableProvider = withTools $ Provider.baseComposableProvider
 
 -- ClaudeSonnet45 with reasoning/thinking support for extended thinking tests
 data ClaudeSonnet45WithReasoning = ClaudeSonnet45WithReasoning deriving stock (Show, Eq)
@@ -63,7 +64,7 @@ instance HasReasoning ClaudeSonnet45WithReasoning Anthropic where
   withReasoning = Provider.anthropicWithReasoning
 
 instance ProviderImplementation Anthropic ClaudeSonnet45WithReasoning where
-  getComposableProvider = Provider.ensureUserFirst . Provider.anthropicWithReasoning . withTools $ Provider.baseComposableProvider
+  getComposableProvider = Provider.anthropicWithReasoning . withTools $ Provider.baseComposableProvider
 
 -- ============================================================================
 -- Mocked HTTP Effect Provider with cached SSE responses
@@ -131,6 +132,8 @@ main = do
 
   -- Run tests with the loaded SSE responses
   hspec $ do
+    describe "Runix OpenAI Streaming (Mocked HTTP)" OpenAIStreamingSpec.spec
+
     describe "Runix Anthropic OAuth Streaming (Mocked HTTP)" $ do
 
       it "can parse text from SSE streaming response" $ do
@@ -211,3 +214,27 @@ main = do
 
             length thinkingBlocks `shouldSatisfy` (> 0)
             length toolCalls `shouldSatisfy` (> 0)
+
+      it "thinking blocks should come before text in message order" $ do
+        result <- testRunner ClaudeSonnet45WithReasoning thinkingOnlyBody $ do
+          let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message ClaudeSonnet45WithReasoning Anthropic]
+              configs = [Streaming True, Reasoning True] :: [ModelConfig Anthropic ClaudeSonnet45WithReasoning]
+          queryLLM configs msgs
+
+        case result of
+          Left err -> fail $ "Error effect: " ++ err
+          Right (Left failErr) -> fail $ "Fail effect: " ++ failErr
+          Right (Right responseMessages) -> do
+            -- Messages are returned oldest-first
+            -- Anthropic should return reasoning before text (same as OpenAI)
+            case responseMessages of
+              [AssistantReasoning _, AssistantText _] ->
+                -- Reasoning before text (oldest-first) - correct
+                return ()
+              [AssistantText _, AssistantReasoning _] ->
+                -- Text before reasoning (oldest-first) - wrong
+                fail "Messages are in wrong order: Text before Reasoning (should be Reasoning before Text for oldest-first)"
+              _ -> fail $ "Unexpected message types or order: " ++ show (map (\case
+                                    AssistantText _ -> "Text"
+                                    AssistantReasoning _ -> "Reasoning"
+                                    _ -> "Other") responseMessages)

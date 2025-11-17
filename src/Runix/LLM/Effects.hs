@@ -27,7 +27,6 @@ import UniversalLLM
 -- The LLM effect now works directly with universal-llm messages
 -- History management is MANUAL - just append and pass around
 data LLM provider model (m :: Type -> Type) a where
-    GetModel :: LLM provider model m model
     QueryLLM :: [ModelConfig provider model]       -- Temperature, MaxTokens, Tools, etc.
              -> [Message model provider]            -- History (append manually)
              -> LLM provider model m [Message model provider]  -- Response messages
