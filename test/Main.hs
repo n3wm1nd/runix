@@ -47,11 +47,11 @@ instance ModelName Anthropic ClaudeSonnet45 where
   modelName _ = "claude-sonnet-4-5-20250929"
 
 instance HasTools ClaudeSonnet45 Anthropic where
-  withTools = chainProviders Provider.anthropicTools
+  withTools = Provider.anthropicTools
 
 -- Composable provider for ClaudeSonnet45 with tools
 claudeSonnet45ComposableProvider :: ComposableProvider Anthropic ClaudeSonnet45 (ToolState ClaudeSonnet45 Anthropic, ())
-claudeSonnet45ComposableProvider = withTools $ Provider.baseComposableProvider
+claudeSonnet45ComposableProvider = withTools `chainProviders` Provider.baseComposableProvider
 
 -- ClaudeSonnet45 with reasoning/thinking support for extended thinking tests
 data ClaudeSonnet45WithReasoning = ClaudeSonnet45WithReasoning deriving stock (Show, Eq)
@@ -60,14 +60,14 @@ instance ModelName Anthropic ClaudeSonnet45WithReasoning where
   modelName _ = "claude-sonnet-4-5-20250929"
 
 instance HasTools ClaudeSonnet45WithReasoning Anthropic where
-  withTools = chainProviders Provider.anthropicTools
+  withTools = Provider.anthropicTools
 
 instance HasReasoning ClaudeSonnet45WithReasoning Anthropic where
-  withReasoning = chainProviders Provider.anthropicReasoning
+  withReasoning = Provider.anthropicReasoning
 
 -- Composable provider for ClaudeSonnet45WithReasoning with tools and reasoning
 claudeSonnet45WithReasoningComposableProvider :: ComposableProvider Anthropic ClaudeSonnet45WithReasoning (ReasoningState ClaudeSonnet45WithReasoning Anthropic, (ToolState ClaudeSonnet45WithReasoning Anthropic, ()))
-claudeSonnet45WithReasoningComposableProvider = withReasoning . withTools $ Provider.baseComposableProvider
+claudeSonnet45WithReasoningComposableProvider = withReasoning `chainProviders` withTools `chainProviders` Provider.baseComposableProvider
 
 -- ============================================================================
 -- Mocked HTTP Effect Provider with cached SSE responses

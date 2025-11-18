@@ -19,24 +19,21 @@ import Polysemy.Error (runError)
 import Polysemy.Fail (runFail)
 import qualified Data.ByteString.Lazy as BSL
 import Paths_runix (getDataFileName)
-import Data.Aeson (Value(..))
-import qualified Data.Aeson.KeyMap as KM
 import Data.Default (Default)
 
 import UniversalLLM
 import UniversalLLM.Providers.OpenAI (OpenAI(..))
 import qualified UniversalLLM.Providers.OpenAI as Provider
-import qualified UniversalLLM.Providers.XMLToolCalls as XMLTools
-import UniversalLLM.Core.Types (chainProviders)
 
 import Runix.LLM.Interpreter (interpretOpenAI)
 import Runix.LLM.Effects (LLM, queryLLM)
 import Runix.HTTP.Effects (HTTP, HTTPResponse(..))
 import qualified Runix.HTTP.Effects as HTTPEff
 import Runix.Logging.Effects (Logging, loggingNull)
-import Runix.Secret.Effects (runSecret, Secret)
+import Runix.Secret.Effects (runSecret)
 import Runix.Cancellation.Effects (cancelNoop)
 import Runix.Streaming.Effects (ignoreChunks)
+import UniversalLLM.Providers.XMLToolCalls (xmlResponseParser)
 
 -- ============================================================================
 -- Test Models
@@ -49,14 +46,14 @@ instance ModelName OpenAI GLM45 where
   modelName _ = "glm-4-plus"
 
 instance HasTools GLM45 OpenAI where
-  withTools = chainProviders Provider.openAITools
+  withTools = Provider.openAITools
 
 instance HasReasoning GLM45 OpenAI where
-  withReasoning = chainProviders Provider.openAIReasoning
+  withReasoning = Provider.openAIReasoning
 
 -- Composable provider for GLM45: with tools, reasoning, and XML response parsing
 glm45ComposableProvider :: ComposableProvider OpenAI GLM45 ((), ((), ((), ())))
-glm45ComposableProvider = XMLTools.withXMLResponseParsing . withReasoning . withTools $ Provider.baseComposableProvider @OpenAI @GLM45
+glm45ComposableProvider = xmlResponseParser `chainProviders` withReasoning `chainProviders` withTools `chainProviders` Provider.baseComposableProvider @OpenAI @GLM45
 
 -- GLM45 with tools but no reasoning (simplified version for text-only test)
 data GLM45TextOnly = GLM45TextOnly deriving stock (Show, Eq)
