@@ -21,11 +21,13 @@ import qualified Data.ByteString.Lazy as BSL
 import Paths_runix (getDataFileName)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson.KeyMap as KM
+import Data.Default (Default)
 
 import UniversalLLM
 import UniversalLLM.Providers.OpenAI (OpenAI(..))
 import qualified UniversalLLM.Providers.OpenAI as Provider
 import qualified UniversalLLM.Providers.XMLToolCalls as XMLTools
+import UniversalLLM.Core.Types (chainProviders)
 
 import Runix.LLM.Interpreter (interpretOpenAI)
 import Runix.LLM.Effects (LLM, queryLLM)
@@ -47,13 +49,14 @@ instance ModelName OpenAI GLM45 where
   modelName _ = "glm-4-plus"
 
 instance HasTools GLM45 OpenAI where
-  withTools = Provider.openAIWithTools
+  withTools = chainProviders Provider.openAITools
 
 instance HasReasoning GLM45 OpenAI where
-  withReasoning = Provider.openAIWithReasoning
+  withReasoning = chainProviders Provider.openAIReasoning
 
-instance ProviderImplementation OpenAI GLM45 where
-  getComposableProvider = XMLTools.withXMLResponseParsing . Provider.openAIWithReasoning . withTools $ Provider.baseComposableProvider
+-- Composable provider for GLM45: with tools, reasoning, and XML response parsing
+glm45ComposableProvider :: ComposableProvider OpenAI GLM45 ((), ((), ((), ())))
+glm45ComposableProvider = XMLTools.withXMLResponseParsing . withReasoning . withTools $ Provider.baseComposableProvider @OpenAI @GLM45
 
 -- GLM45 with tools but no reasoning (simplified version for text-only test)
 data GLM45TextOnly = GLM45TextOnly deriving stock (Show, Eq)
@@ -61,8 +64,9 @@ data GLM45TextOnly = GLM45TextOnly deriving stock (Show, Eq)
 instance ModelName OpenAI GLM45TextOnly where
   modelName _ = "glm-4-plus"
 
-instance ProviderImplementation OpenAI GLM45TextOnly where
-  getComposableProvider = Provider.baseComposableProvider
+-- Composable provider for GLM45TextOnly: base provider only
+glm45TextOnlyComposableProvider :: ComposableProvider OpenAI GLM45TextOnly ()
+glm45TextOnlyComposableProvider = Provider.baseComposableProvider
 
 -- ============================================================================
 -- Mocked HTTP Effect Provider with cached SSE responses
@@ -90,12 +94,13 @@ mockHTTP sseBody = interpret $ \case
 -- ============================================================================
 
 -- Reusable test runner that composes all effect interpreters for testing
-testRunner :: (ModelName OpenAI model, ProviderImplementation OpenAI model)
-           => model
+testRunner :: forall model s a. (ModelName OpenAI model, Default s)
+           => ComposableProvider OpenAI model s
+           -> model
            -> BSL.ByteString
            -> (forall r . Members '[LLM OpenAI model] r => Sem r a)
            -> IO (Either String (Either String a))
-testRunner model sseBody action =
+testRunner composableProvider model sseBody action =
   runM
     . runError @String
     . runFail
@@ -104,7 +109,7 @@ testRunner model sseBody action =
     . runSecret (pure ("mock-api-key" :: String))
     . cancelNoop
     . ignoreChunks
-    . interpretOpenAI OpenAI model  -- interpretOpenAI takes provider first, then model
+    . interpretOpenAI composableProvider OpenAI model
     $ action
 
 -- ============================================================================
@@ -130,7 +135,7 @@ spec = do
   describe "Runix OpenAI Streaming (Mocked HTTP)" $ do
 
     it "can parse text from SSE streaming response" $ do
-      result <- testRunner GLM45TextOnly textResponseBody $ do
+      result <- testRunner glm45TextOnlyComposableProvider GLM45TextOnly textResponseBody $ do
         let msgs = [UserText "Say hello"] :: [Message GLM45TextOnly OpenAI]
             configs = [Streaming True] :: [ModelConfig OpenAI GLM45TextOnly]
         queryLLM configs msgs
@@ -144,7 +149,7 @@ spec = do
           length textMsgs `shouldSatisfy` (> 0)
 
     it "can parse tool calls from SSE streaming response" $ do
-      result <- testRunner GLM45 toolCallResponseBody $ do
+      result <- testRunner glm45ComposableProvider GLM45 toolCallResponseBody $ do
         let msgs = [UserText "What's the weather in Paris?"] :: [Message GLM45 OpenAI]
             configs = [Streaming True] :: [ModelConfig OpenAI GLM45]
         queryLLM configs msgs
@@ -160,7 +165,7 @@ spec = do
           length toolCalls `shouldSatisfy` (> 0)
 
     it "can parse reasoning blocks from SSE streaming response" $ do
-      result <- testRunner GLM45 reasoningOnlyBody $ do
+      result <- testRunner glm45ComposableProvider GLM45 reasoningOnlyBody $ do
         let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message GLM45 OpenAI]
             configs = [Streaming True, Reasoning True] :: [ModelConfig OpenAI GLM45]
         queryLLM configs msgs
@@ -173,7 +178,7 @@ spec = do
           length responseMessages `shouldSatisfy` (> 0)
 
     it "can parse reasoning and tool calls from SSE streaming response" $ do
-      result <- testRunner GLM45 reasoningWithToolsBody $ do
+      result <- testRunner glm45ComposableProvider GLM45 reasoningWithToolsBody $ do
         let msgs = [UserText "What's the weather in Paris?"] :: [Message GLM45 OpenAI]
             configs = [Streaming True, Reasoning True] :: [ModelConfig OpenAI GLM45]
         queryLLM configs msgs
@@ -190,7 +195,7 @@ spec = do
           length reasoningBlocks `shouldSatisfy` (> 0)
 
     it "reasoning blocks should come before text in message order" $ do
-      result <- testRunner GLM45 reasoningOnlyBody $ do
+      result <- testRunner glm45ComposableProvider GLM45 reasoningOnlyBody $ do
         let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message GLM45 OpenAI]
             configs = [Streaming True, Reasoning True] :: [ModelConfig OpenAI GLM45]
         queryLLM configs msgs

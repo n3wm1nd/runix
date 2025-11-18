@@ -90,7 +90,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, http-client, http-types, conduit, exceptions, autodocodec, autodocodec-schema, universal-llm, Glob, stm, vector
+    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, http-client, http-types, conduit, exceptions, autodocodec, autodocodec-schema, universal-llm, Glob, stm, vector, data-default
 
     -- Directories containing source files.
     hs-source-dirs:   src
@@ -139,4 +139,5 @@ test-suite runix-test
         process,
         directory,
         conduit,
-        http-client-conduit
+        http-client-conduit,
+        data-default

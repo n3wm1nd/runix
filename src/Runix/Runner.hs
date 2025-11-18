@@ -49,6 +49,7 @@ import Runix.Compiler.Effects
 import Runix.Cancellation.Effects (Cancellation, cancelNoop, onCancellation)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
+import qualified UniversalLLM.Providers.OpenAI as OpenAI
 import Runix.LLM.Effects
 
 -- External libraries
@@ -91,7 +92,7 @@ openrouter action = do
         Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
         Just key ->
             runSecret (pure key)
-            . interpretOpenRouter OpenRouter (GenericModel "deepseek/deepseek-chat-v3-0324:free")
+            . interpretOpenRouter OpenAI.baseComposableProvider OpenRouter (GenericModel "deepseek/deepseek-chat-v3-0324:free")
             . raiseUnder
             $ action
 
