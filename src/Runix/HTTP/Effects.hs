@@ -45,7 +45,7 @@ data HTTPResponse = HTTPResponse {
     body :: ByteString
 } deriving (Show)
 
-data StreamUpdate = StreamChunk BS.ByteString | StreamResult [BS.ByteString]
+data StreamUpdate = StreamChunk BS.ByteString | StreamResult [BS.ByteString] | StreamError String
 
 data HTTP (m :: Type -> Type) a where
     HttpRequest :: HTTPRequest -> HTTP m HTTPResponse
@@ -129,8 +129,8 @@ httpIO' requestTransform = interpret $ \case
                               .| sinkList
                             -- Send the final result to queue
                             atomically $ writeTQueue updateQueue (StreamResult chunkList))
-                        (\(_ :: CMC.SomeException) -> do
-                            atomically $ writeTQueue updateQueue (StreamResult []))
+                        (\(e :: CMC.SomeException) -> do
+                            atomically $ writeTQueue updateQueue (StreamError (show e)))
 
                 -- Main thread: read updates from queue and emit chunks
                 let consumeUpdates = do
@@ -143,6 +143,8 @@ httpIO' requestTransform = interpret $ \case
                             StreamChunk chunk -> do
                                 emitChunk chunk
                                 consumeUpdates
+                            StreamError errMsg -> do
+                                fail $ "HTTP streaming error: " ++ errMsg
                             StreamResult chunks -> do
                                 return chunks
 
