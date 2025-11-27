@@ -57,6 +57,19 @@ import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), OpenAIErrorResponse(..), OpenAIErrorDetail(..), mergeOpenAIDelta)
 
 -- ============================================================================
+-- Configuration Helper
+-- ============================================================================
+
+-- | Get streaming setting from configs using first-match-wins pattern
+-- This respects explicit overrides: if Streaming False is specified, it takes precedence
+-- over defaultConfigs which may have Streaming True
+isStreamingEnabled :: [ModelConfig provider model] -> Bool
+isStreamingEnabled configs =
+  case [s | Streaming s <- configs] of
+    (s:_) -> s  -- First match wins
+    [] -> False  -- Default to non-streaming if not specified
+
+-- ============================================================================
 -- Generic Model Wrapper
 -- ============================================================================
 
@@ -114,7 +127,7 @@ interpretAnthropicAPIKeyWithState composableProvider action = do
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
-                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
+                let useStreaming = isStreamingEnabled configs
 
                 -- Make the API call and get typed response
                 providerResponse <- if useStreaming
@@ -195,7 +208,7 @@ interpretAnthropicOAuthWithState composableProvider action = do
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
-                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
+                let useStreaming = isStreamingEnabled configs
 
                 -- Make the API call and get typed response
                 providerResponse <- if useStreaming
@@ -282,7 +295,7 @@ interpretOpenAIWithState composableProvider action = do
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
-                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
+                let useStreaming = isStreamingEnabled configs
 
                 -- Make the API call and get typed response
                 providerResponse <- if useStreaming
@@ -368,7 +381,7 @@ interpretOpenRouterWithState composableProvider action = do
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
-                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
+                let useStreaming = isStreamingEnabled configs
 
                 -- Make the API call and get typed response
                 providerResponse <- if useStreaming
@@ -452,7 +465,7 @@ interpretLlamaCppWithState composableProvider endpoint action =
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
-                let useStreaming = any (\case { Streaming True -> True; _ -> False }) configs
+                let useStreaming = isStreamingEnabled configs
 
                 -- Make the API call and get typed response
                 providerResponse <- if useStreaming
