@@ -45,7 +45,7 @@ data HTTPResponse = HTTPResponse {
     body :: ByteString
 } deriving (Show)
 
-data StreamUpdate = StreamChunk BS.ByteString | StreamResult [BS.ByteString] | StreamError String
+data StreamUpdate = StreamChunk BS.ByteString | StreamResult Int [(String, String)] [BS.ByteString] | StreamError String
 
 data HTTP (m :: Type -> Type) a where
     HttpRequest :: HTTPRequest -> HTTP m HTTPResponse
@@ -97,65 +97,59 @@ httpIO' requestTransform = interpret $ \case
                 $ req
         info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
 
-        -- Stream the response body
-        resp <- embed $ CMC.try (httpNoBody hr)
-        case resp of
-            Left (e :: CMC.SomeException) -> fail $ "HTTP streaming error: " ++ show e
-            Right respHead -> do
-                let code = getResponseStatusCode respHead
-                let headers = getResponseHeaders respHead
+        let checkcancel var = do
+                mchunk <- await
+                case mchunk of
+                    Nothing -> return ()
+                    Just chunk -> do
+                        yield chunk
+                        canceled <- lift . atomically $ readTVar var
+                        if canceled then return () else checkcancel var
 
-                let checkcancel var = do
-                        mchunk <- await
-                        case mchunk of
-                            Nothing -> return ()
-                            Just chunk -> do
-                                yield chunk
-                                canceled <- lift . atomically $ readTVar var
-                                if canceled then return () else checkcancel var
+        -- Two communication channels
+        canceledVar <- embed $ newTVarIO False
+        updateQueue <- embed $ newTQueueIO
 
-                -- Two communication channels
-                canceledVar <- embed $ newTVarIO False
-                updateQueue <- embed $ newTQueueIO
+        -- Fork background thread - makes ONE request
+        _ <- embed $ forkIO $
+            CMC.catch
+                (withResponse hr $ \respFull -> do
+                    let code = getResponseStatusCode respFull
+                    let headers = getResponseHeaders respFull
+                    chunkList <- runConduit $
+                      responseBody respFull
+                      .| iterM (\chunk -> atomically $ writeTQueue updateQueue (StreamChunk chunk))
+                      .| checkcancel canceledVar
+                      .| sinkList
+                    -- Send the final result with headers to queue
+                    atomically $ writeTQueue updateQueue (StreamResult code (map (\(hn, b) -> (show hn, show b)) headers) chunkList))
+                (\(e :: CMC.SomeException) -> do
+                    atomically $ writeTQueue updateQueue (StreamError (show e)))
 
-                -- Fork background thread
-                _ <- embed $ forkIO $
-                    CMC.catch
-                        (withResponse hr $ \respFull -> do
-                            chunkList <- runConduit $
-                              responseBody respFull
-                              .| iterM (\chunk -> atomically $ writeTQueue updateQueue (StreamChunk chunk))
-                              .| checkcancel canceledVar
-                              .| sinkList
-                            -- Send the final result to queue
-                            atomically $ writeTQueue updateQueue (StreamResult chunkList))
-                        (\(e :: CMC.SomeException) -> do
-                            atomically $ writeTQueue updateQueue (StreamError (show e)))
+        -- Main thread: read updates from queue and emit chunks
+        let consumeUpdates = do
+                -- Check cancellation and signal the background thread
+                canceled <- isCanceled
+                embed $ atomically $ writeTVar canceledVar canceled
+                -- Wait for the next update from the queue
+                update <- embed $ atomically $ readTQueue updateQueue
+                case update of
+                    StreamChunk chunk -> do
+                        emitChunk chunk
+                        consumeUpdates
+                    StreamError errMsg -> do
+                        fail $ "HTTP streaming error: " ++ errMsg
+                    StreamResult code headers chunks -> do
+                        return (code, headers, chunks)
 
-                -- Main thread: read updates from queue and emit chunks
-                let consumeUpdates = do
-                        -- Check cancellation and signal the background thread
-                        canceled <- isCanceled
-                        embed $ atomically $ writeTVar canceledVar canceled
-                        -- Wait for the next update from the queue
-                        update <- embed $ atomically $ readTQueue updateQueue
-                        case update of
-                            StreamChunk chunk -> do
-                                emitChunk chunk
-                                consumeUpdates
-                            StreamError errMsg -> do
-                                fail $ "HTTP streaming error: " ++ errMsg
-                            StreamResult chunks -> do
-                                return chunks
+        (code, headers, finalChunks) <- consumeUpdates
+        let completeBody = BSL.fromChunks finalChunks
 
-                finalChunks <- consumeUpdates
-                let completeBody = BSL.fromChunks finalChunks
-
-                return $ HTTPResponse
-                    { code = code
-                    , headers = map (\(hn, b) -> (show hn, show b)) headers
-                    , body = completeBody
-                    }
+        return $ HTTPResponse
+            { code = code
+            , headers = headers
+            , body = completeBody
+            }
 
 
 -- | Backward-compatible HTTP interpreter (no streaming chunks emitted)
