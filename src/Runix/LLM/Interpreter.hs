@@ -144,8 +144,9 @@ interpretAnthropicAPIKeyWithState composableProvider action = do
                             Right resp -> return resp
 
                 -- Convert provider response to messages, threading state through
-                let (stackState', resultMessages) = fromProviderResponse composableProvider provider model configs stackState providerResponse
-                return resultMessages
+                case fromProviderResponse composableProvider provider model configs stackState providerResponse of
+                    Left err -> fail $ "LLM error: " ++ show err
+                    Right (stackState', resultMessages) -> return resultMessages
             ) action
     restapiHTTP api withRestAPI
 
@@ -233,8 +234,9 @@ interpretAnthropicOAuthWithState composableProvider action = do
                             Right resp -> return resp
 
                 -- Convert provider response to messages, threading state through
-                let (stackState', resultMessages) = fromProviderResponse composableProvider provider model configs stackState providerResponse
-                return resultMessages
+                case fromProviderResponse composableProvider provider model configs stackState providerResponse of
+                    Left err -> fail $ "LLM error: " ++ show err
+                    Right (stackState', resultMessages) -> return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -312,14 +314,11 @@ interpretOpenAIWithState composableProvider action = do
                             Left err -> fail $ "Failed to parse OpenAI response: " ++ err
                             Right resp -> return resp
 
-                -- Check for error response before parsing
-                case providerResponse of
-                    OpenAIError (OpenAIErrorResponse errDetail) ->
-                        fail $ "OpenAI API error: " ++ show (errorMessage errDetail)
-                    OpenAISuccess _ -> do
-                        -- Convert provider response to messages, threading state through
-                        let (stackState', resultMessages) = fromProviderResponse composableProvider provider model configs stackState providerResponse
-                        return resultMessages
+                -- Convert provider response to messages, threading state through
+                -- (Error handling is now done in fromProviderResponse)
+                case fromProviderResponse composableProvider provider model configs stackState providerResponse of
+                    Left err -> fail $ "LLM error: " ++ show err
+                    Right (stackState', resultMessages) -> return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -399,13 +398,11 @@ interpretOpenRouterWithState composableProvider action = do
                             Right resp -> return resp
 
                 -- Check for error response before parsing
-                case providerResponse of
-                    OpenAIError (OpenAIErrorResponse errDetail) ->
-                        fail $ "OpenRouter API error: " ++ show (errorMessage errDetail)
-                    OpenAISuccess _ -> do
-                        -- Convert provider response to messages, threading state through
-                        let (stackState', resultMessages) = fromProviderResponse composableProvider provider model configs stackState providerResponse
-                        return resultMessages
+                -- Convert provider response to messages, threading state through
+                -- (Error handling is now done in fromProviderResponse)
+                case fromProviderResponse composableProvider provider model configs stackState providerResponse of
+                    Left err -> fail $ "LLM error: " ++ show err
+                    Right (stackState', resultMessages) -> return resultMessages
             ) action
     restapiHTTP auth withRestAPI
 
@@ -483,13 +480,11 @@ interpretLlamaCppWithState composableProvider endpoint action =
                             Right resp -> return resp
 
                 -- Check for error response before parsing
-                case providerResponse of
-                    OpenAIError (OpenAIErrorResponse errDetail) ->
-                        fail $ "llama.cpp API error: " ++ show (errorMessage errDetail)
-                    OpenAISuccess _ -> do
-                        -- Convert provider response to messages, threading state through
-                        let (stackState', resultMessages) = fromProviderResponse composableProvider provider model configs stackState providerResponse
-                        return resultMessages
+                -- Convert provider response to messages, threading state through
+                -- (Error handling is now done in fromProviderResponse)
+                case fromProviderResponse composableProvider provider model configs stackState providerResponse of
+                    Left err -> fail $ "LLM error: " ++ show err
+                    Right (stackState', resultMessages) -> return resultMessages
             ) action
     in restapiHTTP auth withRestAPI
 
