@@ -54,7 +54,7 @@ import Runix.Secret.Effects (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
 import Runix.Cancellation.Effects (onCancellation, Cancellation)
 import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicContentBlock(..))
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), OpenAIErrorResponse(..), OpenAIErrorDetail(..), mergeOpenAIDelta)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), OpenAIErrorResponse(..), OpenAIErrorDetail(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
 
 -- ============================================================================
 -- Configuration Helper
@@ -304,8 +304,8 @@ interpretOpenAIWithState composableProvider action = do
                     then do
                         -- Streaming: reassemble SSE into typed response
                         httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = OpenAIMessage "assistant" Nothing Nothing Nothing Nothing
-                        let emptyResp = OpenAISuccessResponse [OpenAIChoice emptyMsg]
+                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
+                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
                         return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
                     else do
                         -- Non-streaming: parse JSON to typed response
@@ -387,8 +387,8 @@ interpretOpenRouterWithState composableProvider action = do
                     then do
                         -- Streaming: reassemble SSE into typed response
                         httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = OpenAIMessage "assistant" Nothing Nothing Nothing Nothing
-                        let emptyResp = OpenAISuccessResponse [OpenAIChoice emptyMsg]
+                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
+                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
                         return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
                     else do
                         -- Non-streaming: parse JSON to typed response
@@ -469,8 +469,8 @@ interpretLlamaCppWithState composableProvider endpoint action =
                     then do
                         -- Streaming: reassemble SSE into typed response
                         httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = OpenAIMessage "assistant" Nothing Nothing Nothing Nothing
-                        let emptyResp = OpenAISuccessResponse [OpenAIChoice emptyMsg]
+                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
+                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
                         return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
                     else do
                         -- Non-streaming: parse JSON to typed response
