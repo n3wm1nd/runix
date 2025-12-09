@@ -49,7 +49,7 @@ import qualified UniversalLLM.Providers.OpenAI as OpenAI
 import Runix.LLM.Effects (LLM(..), queryLLM)
 import Runix.HTTP.Effects (HTTP, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP.Effects as HTTPEff
-import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP)
+import Runix.RestAPI.Effects (RestAPI(..), RestAPIStreaming(..), RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming)
 import Runix.Secret.Effects (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
 import Runix.Cancellation.Effects (onCancellation, Cancellation)
@@ -116,7 +116,7 @@ interpretAnthropicAPIKeyWithState composableProvider action = do
     apiKey <- getSecret
     let api = AnthropicAPIKeyAuth apiKey
         -- We need to thread provider stack state through the computation
-        withRestAPI = reinterpret (\case
+        withRestAPI = reinterpret2 (\case
             QueryLLM configs messages -> do
                 -- Get current model/stack state from state
                 (model, stackState) <- get
@@ -149,7 +149,7 @@ interpretAnthropicAPIKeyWithState composableProvider action = do
                         put (model, stackState'')
                         return resultMessages
             ) action
-    restapiHTTP api withRestAPI
+    restapiHTTP api $ restapiHTTPStreaming api $ withRestAPI 
 
 -- Public wrapper for backward compatibility
 interpretAnthropicAPIKey :: forall model s r a.
@@ -197,7 +197,7 @@ interpretAnthropicOAuthWithState :: forall model s r a.
 interpretAnthropicOAuthWithState composableProvider action = do
     oauthToken <- getSecret
     let auth = AnthropicOAuthAuth oauthToken
-        withRestAPI = reinterpret (\case
+        withRestAPI = reinterpret2 (\case
             QueryLLM configs messages -> do
                 -- Get current model/stack state from state
                 (model, stackState) <- get
@@ -241,7 +241,7 @@ interpretAnthropicOAuthWithState composableProvider action = do
                         put (model, stackState'')
                         return resultMessages
             ) action
-    restapiHTTP auth withRestAPI
+    restapiHTTP auth $ restapiHTTPStreaming auth  $ withRestAPI
 
 -- Public wrapper for backward compatibility
 interpretAnthropicOAuth :: forall model s r a.
@@ -289,7 +289,7 @@ interpretOpenAIWithState :: forall model s r a.
 interpretOpenAIWithState composableProvider action = do
     apiKey <- getSecret
     let auth = OpenAIAuth apiKey
-        withRestAPI = reinterpret (\case
+        withRestAPI = reinterpret2 (\case
             QueryLLM configs messages -> do
                 -- Get current model/stack state from state
                 (model, stackState) <- get
@@ -325,7 +325,7 @@ interpretOpenAIWithState composableProvider action = do
                         put (model, stackState'')
                         return resultMessages
             ) action
-    restapiHTTP auth withRestAPI
+    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
 
 -- Public wrapper for backward compatibility
 interpretOpenAI :: forall model s r a.
@@ -374,7 +374,7 @@ interpretOpenRouterWithState :: forall model s r a.
 interpretOpenRouterWithState composableProvider action = do
     apiKey <- getSecret
     let auth = OpenRouterAuth apiKey
-        withRestAPI = reinterpret (\case
+        withRestAPI = reinterpret2 (\case
             QueryLLM configs messages -> do
                 -- Get current model/stack state from state
                 (model, stackState) <- get
@@ -411,7 +411,7 @@ interpretOpenRouterWithState composableProvider action = do
                         put (model, stackState'')
                         return resultMessages
             ) action
-    restapiHTTP auth withRestAPI
+    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
 
 -- Public wrapper for backward compatibility
 interpretOpenRouter :: forall model s r a.
@@ -458,7 +458,7 @@ interpretLlamaCppWithState :: forall model s r a.
                   -> Sem r a
 interpretLlamaCppWithState composableProvider endpoint action =
     let auth = LlamaCppAuth endpoint
-        withRestAPI = reinterpret (\case
+        withRestAPI = reinterpret2 (\case
             QueryLLM configs messages -> do
                 -- Get current model/stack state from state
                 (model, stackState) <- get
@@ -495,7 +495,8 @@ interpretLlamaCppWithState composableProvider endpoint action =
                         put (model, stackState'')
                         return resultMessages
             ) action
-    in restapiHTTP auth withRestAPI
+    in 
+    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
 
 -- Public wrapper for backward compatibility
 -- Llama.cpp uses OpenAI protocol internally
