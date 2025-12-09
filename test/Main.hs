@@ -10,6 +10,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main (main) where
 
@@ -63,10 +64,11 @@ instance HasTools ClaudeSonnet45WithReasoning Anthropic where
   withTools = Provider.anthropicTools
 
 instance HasReasoning ClaudeSonnet45WithReasoning Anthropic where
+  type ReasoningState ClaudeSonnet45WithReasoning Anthropic = Provider.AnthropicReasoningState
   withReasoning = Provider.anthropicReasoning
 
 -- Composable provider for ClaudeSonnet45WithReasoning with tools and reasoning
-claudeSonnet45WithReasoningComposableProvider :: ComposableProvider Anthropic ClaudeSonnet45WithReasoning (ReasoningState ClaudeSonnet45WithReasoning Anthropic, (ToolState ClaudeSonnet45WithReasoning Anthropic, ()))
+claudeSonnet45WithReasoningComposableProvider :: ComposableProvider Anthropic ClaudeSonnet45WithReasoning (Provider.AnthropicReasoningState, (ToolState ClaudeSonnet45WithReasoning Anthropic, ()))
 claudeSonnet45WithReasoningComposableProvider = withReasoning `chainProviders` withTools `chainProviders` Provider.baseComposableProvider
 
 -- ============================================================================
