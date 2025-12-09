@@ -61,7 +61,7 @@ class RestEndpoint p where
     apiroot :: p -> String
     authheaders :: p -> [(String, String)]
 
-restapiHTTP :: HasCallStack => (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
+restapiHTTP :: HasCallStack => (RestEndpoint p, Members [HTTP, HTTPStreaming, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
 restapiHTTP api = interpret $ \case
     RestRequest method e maybeData -> do
         let httpReq = makeHTTPRequest method e maybeData

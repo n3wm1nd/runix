@@ -47,7 +47,7 @@ import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
 import Runix.LLM.Effects (LLM(..), queryLLM)
-import Runix.HTTP.Effects (HTTP, HTTPResponse(..))
+import Runix.HTTP.Effects (HTTP, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP.Effects as HTTPEff
 import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP)
 import Runix.Secret.Effects (Secret, getSecret)
@@ -107,7 +107,7 @@ interpretAnthropicAPIKeyWithState :: forall model s r a.
                             , Monoid (ProviderRequest model)
                             , ProviderResponse model ~ AnthropicResponse
                             , Default s
-                            , Members '[HTTP, Fail, Secret String, State (model, s)] r
+                            , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
                             )
                          => ComposableProvider model s
                          -> Sem (LLM model : r) a
@@ -159,7 +159,7 @@ interpretAnthropicAPIKey :: forall model s r a.
                             , Monoid (ProviderRequest model)
                             , ProviderResponse model ~ AnthropicResponse
                             , Default s
-                            , Members '[HTTP, Fail, Secret String] r
+                            , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                             )
                          => ComposableProvider model s
                          -> model   -- ^ Model value
@@ -189,7 +189,7 @@ interpretAnthropicOAuthWithState :: forall model s r a.
                            , ProviderRequest model ~ AnthropicRequest
                            , ProviderResponse model ~ AnthropicResponse
                            , Default s
-                           , Members '[HTTP, Fail, Secret String, State (model, s)] r
+                           , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
                            )
                         => ComposableProvider model s
                         -> Sem (LLM model : r) a
@@ -251,7 +251,7 @@ interpretAnthropicOAuth :: forall model s r a.
                            , ProviderRequest model ~ AnthropicRequest
                            , ProviderResponse model ~ AnthropicResponse
                            , Default s
-                           , Members '[HTTP, Fail, Secret String] r
+                           , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                            )
                         => ComposableProvider model s
                         -> model
@@ -281,7 +281,7 @@ interpretOpenAIWithState :: forall model s r a.
                    , Monoid (ProviderRequest model)
                    , ProviderResponse model ~ OpenAIResponse
                    , Default s
-                   , Members '[HTTP, Fail, Secret String, State (model, s)] r
+                   , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
                    )
                 => ComposableProvider model s
                 -> Sem (LLM model : r) a
@@ -335,7 +335,7 @@ interpretOpenAI :: forall model s r a.
                    , Monoid (ProviderRequest model)
                    , ProviderResponse model ~ OpenAIResponse
                    , Default s
-                   , Members '[HTTP, Fail, Secret String] r
+                   , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                    )
                 => ComposableProvider model s
                 -> model   -- ^ Model value
@@ -366,7 +366,7 @@ interpretOpenRouterWithState :: forall model s r a.
                        , Monoid (ProviderRequest model)
                        , ProviderResponse model ~ OpenAIResponse
                        , Default s
-                       , Members '[HTTP, Fail, Secret String, State (model, s)] r
+                       , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
                        )
                     => ComposableProvider model s
                     -> Sem (LLM model : r) a
@@ -421,7 +421,7 @@ interpretOpenRouter :: forall model s r a.
                        , Monoid (ProviderRequest model)
                        , ProviderResponse model ~ OpenAIResponse
                        , Default s
-                       , Members '[HTTP, Fail, Secret String] r
+                       , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                        )
                     => ComposableProvider model s
                     -> model   -- ^ Model value
@@ -450,7 +450,7 @@ interpretLlamaCppWithState :: forall model s r a.
                      , HasCodec (ProviderResponse model)
                      , ProviderResponse model ~ OpenAIResponse
                      , Default s
-                     , Members '[HTTP, Fail, State (model, s)] r, Monoid (ProviderRequest model)
+                     , Members '[HTTP, HTTPStreaming, Fail, State (model, s)] r, Monoid (ProviderRequest model)
                      )
                   => ComposableProvider model s
                   -> String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
@@ -505,7 +505,7 @@ interpretLlamaCpp :: forall model s r a.
                      , HasCodec (ProviderResponse model)
                      , ProviderResponse model ~ OpenAIResponse
                      , Default s
-                     , Members '[HTTP, Fail] r, Monoid (ProviderRequest model)
+                     , Members '[HTTP, HTTPStreaming, Fail] r, Monoid (ProviderRequest model)
                      )
                   => ComposableProvider model s
                   -> String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")

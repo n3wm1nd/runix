@@ -47,16 +47,20 @@ data HTTPResponse = HTTPResponse {
 
 data StreamUpdate = StreamChunk BS.ByteString | StreamResult Int [(String, String)] [BS.ByteString] | StreamError String
 
+-- | Basic HTTP effect for non-streaming requests
 data HTTP (m :: Type -> Type) a where
     HttpRequest :: HTTPRequest -> HTTP m HTTPResponse
-    HttpRequestStreaming :: HTTPRequest -> HTTP m HTTPResponse
 makeSem ''HTTP
 
--- Internal interpreter with streaming support
-httpIO' :: HasCallStack => Members [Fail, Logging, StreamChunk BS.ByteString, Embed IO, Cancellation] r => (Request -> Request) -> Sem (HTTP : r) a -> Sem r a
-httpIO' requestTransform = interpret $ \case
+-- | HTTP streaming effect for streaming requests
+data HTTPStreaming (m :: Type -> Type) a where
+    HttpRequestStreaming :: HTTPRequest -> HTTPStreaming m HTTPResponse
+makeSem ''HTTPStreaming
+
+-- | Basic HTTP interpreter (non-streaming)
+httpIO :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, Embed IO, Cancellation] r => Sem (HTTP : r) a -> Sem r a
+httpIO requestTransform = interpret $ \case
     HttpRequest request -> do
-        -- Non-streaming request: use httpLBS
         parsed <- embed $ CMC.try (parseRequest request.uri)
         req <- case parsed of
             Right r -> return r
@@ -79,6 +83,9 @@ httpIO' requestTransform = interpret $ \case
             , body = getResponseBody resp
             }
 
+-- | HTTP streaming interpreter - emits StreamChunk effects
+httpIOStreaming :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, StreamChunk BS.ByteString, Embed IO, Cancellation] r => Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreaming requestTransform = interpret $ \case
     HttpRequestStreaming request -> do
         -- Streaming request: emit chunks as they arrive
         parsed <- embed $ CMC.try (parseRequest request.uri)
@@ -151,20 +158,13 @@ httpIO' requestTransform = interpret $ \case
             , body = completeBody
             }
 
-
--- | Backward-compatible HTTP interpreter (no streaming chunks emitted)
--- This is the original httpIO signature that existing code expects
-httpIO :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, Embed IO, Cancellation] r => Sem (HTTP : r) a -> Sem r a
-httpIO requestTransform prog = ignoreChunks $ httpIO' requestTransform $ raiseUnder prog
-
 -- | Convenience function - httpIO with no request transformation
 httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO, Cancellation] r => Sem (HTTP : r) a -> Sem r a
 httpIO_ = httpIO id
 
--- | HTTP interpreter with streaming support - emits StreamChunk effects
--- Use this when you want to receive streaming chunks via the StreamChunk effect
-httpIOStreaming :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, StreamChunk BS.ByteString, Embed IO, Cancellation] r => Sem (HTTP : r) a -> Sem r a
-httpIOStreaming = httpIO'
+-- | Convenience function - httpIOStreaming with no request transformation
+httpIOStreaming_ :: HasCallStack => Members [Fail, Logging, StreamChunk BS.ByteString, Embed IO, Cancellation] r => Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreaming_ = httpIOStreaming id
 
 -- | Helper function to set request timeout in seconds
 withRequestTimeout :: Int -> Request -> Request
@@ -177,6 +177,10 @@ withHeaders modifyRequest = intercept $ \case
     HttpRequest request -> do
         info $ fromString "intercepted request"
         httpRequest (modifyRequest request)
+
+-- | Reinterpreter for HTTPStreaming with header support
+withStreamingHeaders :: Members [Fail, Logging, HTTPStreaming] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
+withStreamingHeaders modifyRequest = intercept $ \case
     HttpRequestStreaming request -> do
         info $ fromString "intercepted streaming request"
         httpRequestStreaming (modifyRequest request)
@@ -184,4 +188,3 @@ withHeaders modifyRequest = intercept $ \case
 -- Example usage of withHeaders for setting authentication tokens:
 --
 -- authenticatedRequest :: Members [HTTP, RestAPI] r => Sem (HTTP : RestAPI : r) a -> Sem (HTTP : RestAPI : r) a
--- authenticatedRequest = withHeaders $ \req -> req { headers = ("Authorization", "Bearer token123") : headers req }

@@ -26,6 +26,7 @@ module Runix.Runner (
     module Runix.Logging.Effects,
     module Runix.Secret.Effects,
     module Runix.Compiler.Effects,
+    module Runix.Streaming.Effects,
     Coding
 ) where
 
@@ -46,6 +47,7 @@ import Runix.HTTP.Effects
 import Runix.Logging.Effects
 import Runix.Secret.Effects
 import Runix.Compiler.Effects
+import Runix.Streaming.Effects
 import Runix.Cancellation.Effects (Cancellation, cancelNoop, onCancellation)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
@@ -64,7 +66,7 @@ class Coding model
 instance Coding GenericModel
 
 -- Engine - Generic over model (which now includes provider)
-type SafeEffects model = [FileSystemRead, FileSystemWrite, HTTP, CompileTask, Logging, LLM model]
+type SafeEffects model = [FileSystemRead, FileSystemWrite, HTTP, HTTPStreaming, CompileTask, Logging, LLM model]
 
 -- | IO interpreter for CompileTask effect
 -- NOTE: This must stay here to avoid circular dependency (Compiler.Compiler imports Compiler.Effects)
@@ -85,8 +87,8 @@ compileTaskIO = interpret $ \case
                 return s
 
 -- | Example OpenRouter interpreter using environment variable
--- This demonstrates how to compose the various effect interpreters
-openrouter :: Members [Embed IO, Fail, HTTP, Cancellation] r => Sem (LLM (Model GenericModel OpenRouter) : r) a -> Sem r a
+-- This demonstrates how to compose of various effect interpreters
+openrouter :: Members [Embed IO, Fail, HTTP, HTTPStreaming, Cancellation] r => Sem (LLM (Model GenericModel OpenRouter) : r) a -> Sem r a
 openrouter action = do
     apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
     case apiKey of
@@ -98,7 +100,6 @@ openrouter action = do
             $ action
 
 -- | Example runner combining all effect interpreters
--- This demonstrates the complete effect stack composition
+-- This demonstrates complete effect stack composition
 runUntrusted :: HasCallStack => (forall r . Members (SafeEffects (Model GenericModel OpenRouter)) r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . cancelNoop . httpIO_ . filesystemIO . openrouter . compileTaskIO
-
+runUntrusted = runM . runError . loggingIO . failLog . cancelNoop . httpIO_ . ignoreChunks . httpIOStreaming_ . filesystemIO . openrouter . compileTaskIO

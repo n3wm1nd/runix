@@ -32,7 +32,7 @@ import Data.Default (Default)
 
 import Runix.LLM.Interpreter (interpretAnthropicOAuth)
 import Runix.LLM.Effects (LLM, queryLLM)
-import Runix.HTTP.Effects (HTTP, HTTPResponse(..))
+import Runix.HTTP.Effects (HTTP, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP.Effects as HTTPEff
 import Runix.Logging.Effects (Logging, loggingNull)
 import Runix.Secret.Effects (runSecret)
@@ -79,21 +79,20 @@ claudeSonnet45WithReasoningComposableProvider = withReasoning `chainProviders` w
 
 -- Mock HTTP effect that uses cached SSE responses from test fixtures
 -- SSE responses come from real Anthropic API calls recorded in universal-llm tests
-mockHTTP :: BSL.ByteString -> Members '[Logging, Embed IO] r => Sem (HTTP ': r) a -> Sem r a
-mockHTTP sseBody = interpret $ \case
-  HTTPEff.HttpRequest _ -> do
-    -- Non-streaming: return success with empty response (not tested in these tests)
-    return $ HTTPResponse
-      200
-      [("content-type", "application/json")]
-      "{\"id\":\"mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-5-20250929\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
-
+mockHTTP :: BSL.ByteString -> Members '[Logging, Embed IO] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
+mockHTTP sseBody = interpret (\case
   HTTPEff.HttpRequestStreaming _req -> do
     -- Streaming: return the cached SSE response
     return $ HTTPResponse
       200
       [("content-type", "text/event-stream")]
-      sseBody
+      sseBody) . interpret (\case
+    HTTPEff.HttpRequest _ -> do
+      -- Non-streaming: return success with empty response (not tested in these tests)
+      return $ HTTPResponse
+        200
+        [("content-type", "application/json")]
+        "{\"id\":\"mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-5-20250929\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}")
 
 -- ============================================================================
 -- Test Runner
