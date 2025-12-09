@@ -48,7 +48,7 @@ import Runix.Logging.Effects
 import Runix.Secret.Effects
 import Runix.Compiler.Effects
 import Runix.Streaming.Effects
-import Runix.Cancellation.Effects (Cancellation, cancelNoop, onCancellation)
+import Runix.Cancellation.Effects (Cancellation, cancelNoop)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
 import qualified UniversalLLM.Providers.OpenAI as OpenAI

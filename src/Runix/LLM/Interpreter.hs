@@ -33,8 +33,6 @@ module Runix.LLM.Interpreter
 import Polysemy
 import Polysemy.Fail
 import Polysemy.State (State, evalState, get, put)
-import Data.Aeson (toJSON)  -- Import for error response parsing
-import Data.ByteString.Lazy (fromStrict)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
@@ -42,19 +40,16 @@ import Data.Default (Default, def)
 
 import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt)
-import UniversalLLM.Providers.Anthropic as Anthropic (baseComposableProvider)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
-import qualified UniversalLLM.Providers.OpenAI as OpenAI
 
 import Runix.LLM.Effects (LLM(..), queryLLM)
 import Runix.HTTP.Effects (HTTP, HTTPStreaming, HTTPResponse(..))
-import qualified Runix.HTTP.Effects as HTTPEff
-import Runix.RestAPI.Effects (RestAPI(..), RestAPIStreaming(..), RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming)
+import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming)
 import Runix.Secret.Effects (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
-import Runix.Cancellation.Effects (onCancellation, Cancellation)
-import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicContentBlock(..))
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), OpenAIErrorResponse(..), OpenAIErrorDetail(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
+import Runix.Cancellation.Effects (Cancellation, onCancellation)
+import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
 
 -- ============================================================================
 -- Configuration Helper

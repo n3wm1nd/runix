@@ -13,12 +13,11 @@
 
 module Runix.RestAPI.Effects where
 import Polysemy
+import Polysemy.Fail
 import Data.Aeson
 import Data.Kind (Type)
 import GHC.Stack
 import Runix.HTTP.Effects
-import Polysemy.Fail
-import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import System.FilePath
 

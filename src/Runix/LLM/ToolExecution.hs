@@ -10,7 +10,6 @@ module Runix.LLM.ToolExecution
 
 import Polysemy
 import Polysemy.Fail (Fail, runFail)
-import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE

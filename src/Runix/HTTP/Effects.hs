@@ -26,7 +26,7 @@ import qualified Control.Monad.Catch as CMC
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro, responseBody)
 import Runix.Logging.Effects (Logging, info)
 import Runix.Cancellation.Effects (Cancellation, isCanceled)
-import Runix.Streaming.Effects (StreamChunk, emitChunk, ignoreChunks)
+import Runix.Streaming.Effects (StreamChunk, emitChunk)
 import Conduit
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
