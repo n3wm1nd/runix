@@ -50,6 +50,7 @@ import Runix.Cancellation.Effects (Cancellation, cancelNoop, onCancellation)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
+import UniversalLLM (Model(..))
 import Runix.LLM.Effects
 
 -- External libraries
@@ -62,8 +63,8 @@ class Coding model
 
 instance Coding GenericModel
 
--- Engine - Generic over provider and model
-type SafeEffects provider model = [FileSystemRead, FileSystemWrite, HTTP, CompileTask, Logging, LLM provider model]
+-- Engine - Generic over model (which now includes provider)
+type SafeEffects model = [FileSystemRead, FileSystemWrite, HTTP, CompileTask, Logging, LLM model]
 
 -- | IO interpreter for CompileTask effect
 -- NOTE: This must stay here to avoid circular dependency (Compiler.Compiler imports Compiler.Effects)
@@ -85,19 +86,19 @@ compileTaskIO = interpret $ \case
 
 -- | Example OpenRouter interpreter using environment variable
 -- This demonstrates how to compose the various effect interpreters
-openrouter :: Members [Embed IO, Fail, HTTP, Cancellation] r => Sem (LLM OpenRouter GenericModel : r) a -> Sem r a
+openrouter :: Members [Embed IO, Fail, HTTP, Cancellation] r => Sem (LLM (Model GenericModel OpenRouter) : r) a -> Sem r a
 openrouter action = do
     apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
     case apiKey of
         Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
         Just key ->
             runSecret (pure key)
-            . interpretOpenRouter OpenAI.baseComposableProvider OpenRouter (GenericModel "deepseek/deepseek-chat-v3-0324:free")
+            . interpretOpenRouter OpenAI.baseComposableProvider (Model (GenericModel "deepseek/deepseek-chat-v3-0324:free") OpenRouter)
             . raiseUnder
             $ action
 
 -- | Example runner combining all effect interpreters
 -- This demonstrates the complete effect stack composition
-runUntrusted :: HasCallStack => (forall r . Members (SafeEffects OpenRouter GenericModel) r => Sem r a) -> IO (Either String a)
+runUntrusted :: HasCallStack => (forall r . Members (SafeEffects (Model GenericModel OpenRouter)) r => Sem r a) -> IO (Either String a)
 runUntrusted = runM . runError . loggingIO . failLog . cancelNoop . httpIO_ . filesystemIO . openrouter . compileTaskIO
 

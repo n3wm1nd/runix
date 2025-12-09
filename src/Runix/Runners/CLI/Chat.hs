@@ -20,8 +20,8 @@ import UniversalLLM (Message)
 -- | Interactive chat loop that accumulates conversation history
 -- The agent function receives user input and current history, returns updated history
 chatLoop :: Member (Embed IO) r
-         => (T.Text -> [Message model provider] -> Sem r [Message model provider])
-         -> [Message model provider]
+         => (T.Text -> [Message model] -> Sem r [Message model])
+         -> [Message model]
          -> Sem r ()
 chatLoop agentFunc history = do
     -- Show prompt first

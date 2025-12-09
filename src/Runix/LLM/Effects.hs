@@ -26,15 +26,15 @@ import UniversalLLM
 
 -- The LLM effect now works directly with universal-llm messages
 -- History management is MANUAL - just append and pass around
-data LLM provider model (m :: Type -> Type) a where
-    QueryLLM :: [ModelConfig provider model]       -- Temperature, MaxTokens, Tools, etc.
-             -> [Message model provider]            -- History (append manually)
-             -> LLM provider model m [Message model provider]  -- Response messages
+data LLM model (m :: Type -> Type) a where
+    QueryLLM :: [ModelConfig model]       -- Temperature, MaxTokens, Tools, etc.
+             -> [Message model]            -- History (append manually)
+             -> LLM model m [Message model]  -- Response messages
 
 makeSem ''LLM
 
 -- Convenience functions for simple queries
-askLLM :: Members '[LLM provider model, Fail] r => Text -> Sem r Text
+askLLM :: Members '[LLM model, Fail] r => Text -> Sem r Text
 askLLM query = do
     response <- queryLLM [] [UserText query]  -- No history, simple query
     case [t | AssistantText t <- response] of
@@ -42,7 +42,7 @@ askLLM query = do
         _ -> fail "Expected single text response"
 
 -- Get response with reasoning/thinking
-askLLMWithReasoning :: (Members '[LLM provider model, Fail] r, HasReasoning model provider)
+askLLMWithReasoning :: (Members '[LLM model, Fail] r, HasReasoning model)
                     => Text -> Sem r (Text, Maybe Text)
 askLLMWithReasoning query = do
     response <- queryLLM [Reasoning True] [UserText query]
@@ -54,11 +54,11 @@ askLLMWithReasoning query = do
     listToMaybe (x:_) = Just x
 
 -- Continue conversation - manual history management
-continueConversation :: Member (LLM provider model) r
-                     => [ModelConfig provider model]
-                     -> [Message model provider]  -- YOU manage this
-                     -> Message model provider     -- New message
-                     -> Sem r [Message model provider]
+continueConversation :: Member (LLM model) r
+                     => [ModelConfig model]
+                     -> [Message model]  -- YOU manage this
+                     -> Message model     -- New message
+                     -> Sem r [Message model]
 continueConversation configs history newMsg = do
     queryLLM configs (history ++ [newMsg])
 
@@ -78,7 +78,7 @@ extractThinking input =
         _ -> (input, Nothing)  -- Multiple thinking tags, return original
 
 -- Legacy compatibility: Get response with thinking content (using text extraction)
-askLLMWithThinking :: Members '[LLM provider model, Fail] r => Text -> Sem r (Text, Maybe Text)
+askLLMWithThinking :: Members '[LLM model, Fail] r => Text -> Sem r (Text, Maybe Text)
 askLLMWithThinking query = do
     response <- queryLLM [] [UserText query]
     case [t | AssistantText t <- response] of

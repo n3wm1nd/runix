@@ -14,11 +14,12 @@ import qualified Data.ByteString.Lazy as BL
 import Polysemy
 import Runix.Runner (runUntrusted, SafeEffects)
 import Runix.LLM.Interpreter (OpenRouter, GenericModel)
+import UniversalLLM (Model(..))
 
 -- | Simple CLI runner for a single task
 -- Takes task function directly, reads JSON from stdin, writes JSON to stdout
 singleTaskRunner :: (FromJSON input, ToJSON output)
-                 => (input -> (forall r . Members (SafeEffects OpenRouter GenericModel) r => Sem r output))
+                 => (input -> (forall r . Members (SafeEffects (Model GenericModel OpenRouter)) r => Sem r output))
                  -> IO ()
 singleTaskRunner taskFunc = do
   result <- do
