@@ -76,22 +76,36 @@ extractContentFromChunk chunk =
                         thinkingResult <|> textResult
                     else Nothing
 
-        -- Try OpenAI format (choices[0].delta.content or choices[0].delta.reasoning_content)
+        -- Try OpenAI format (choices[0].delta.content or choices[0].delta.reasoning_content or choices[0].delta.reasoning or choices[0].delta.reasoning_details)
         let openaiResult = do
                 Aeson.Array choices <- KM.lookup "choices" obj
                 choice <- choices V.!? 0
                 case choice of
                     Aeson.Object choiceObj -> do
                         Aeson.Object delta <- KM.lookup "delta" choiceObj
-                        -- Try reasoning_content first
-                        let reasoningResult = do
+                        -- Try reasoning_content first (OpenAI native format)
+                        let reasoningContentResult = do
                                 Aeson.String reasoning <- KM.lookup "reasoning_content" delta
                                 return $ StreamingReasoning reasoning
+                        -- Try reasoning (OpenRouter direct field)
+                        let reasoningResult = do
+                                Aeson.String reasoning <- KM.lookup "reasoning" delta
+                                return $ StreamingReasoning reasoning
+                        -- Try reasoning_details (OpenRouter format with array of {text: "..."})
+                        let reasoningDetailsResult = do
+                                Aeson.Array details <- KM.lookup "reasoning_details" delta
+                                -- Extract text from first detail object
+                                detailObj <- details V.!? 0
+                                case detailObj of
+                                    Aeson.Object obj' -> do
+                                        Aeson.String text <- KM.lookup "text" obj'
+                                        return $ StreamingReasoning text
+                                    _ -> Nothing
                         -- Otherwise try regular content
                         let contentResult = do
                                 Aeson.String content <- KM.lookup "content" delta
                                 return $ StreamingText content
-                        reasoningResult <|> contentResult
+                        reasoningContentResult <|> reasoningResult <|> reasoningDetailsResult <|> contentResult
                     _ -> Nothing
 
         anthropicResult <|> openaiResult

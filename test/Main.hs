@@ -39,6 +39,7 @@ import Runix.Secret.Effects (runSecret)
 import Runix.Cancellation.Effects (cancelNoop)
 import Runix.Streaming.Effects (ignoreChunks)
 import qualified OpenAIStreamingSpec
+import qualified SSEParserSpec
 
 -- ============================================================================
 -- Test Models
@@ -139,6 +140,8 @@ main = do
 
   -- Run tests with the loaded SSE responses
   hspec $ do
+    describe "SSE Parser Unit Tests" SSEParserSpec.spec
+
     describe "Runix OpenAI Streaming (Mocked HTTP)" OpenAIStreamingSpec.spec
 
     describe "Runix Anthropic OAuth Streaming (Mocked HTTP)" $ do
