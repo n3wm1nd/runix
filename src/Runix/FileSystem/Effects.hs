@@ -7,18 +7,25 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Runix.FileSystem.Effects where
 import Data.Kind (Type)
 import Polysemy
+import Polysemy.State (State, get, put, evalState)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Prelude hiding (readFile, writeFile)
 import Polysemy.Fail
 import System.FilePath
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, foldl')
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes)
 import Data.String (fromString)
+import Data.Time (UTCTime)
 import GHC.Stack
+import Control.Monad (forM)
 import qualified System.Directory
 import qualified System.FilePath.Glob as Glob
 import Runix.Logging.Effects (Logging, info)
@@ -181,3 +188,123 @@ filesystemWriteIO = interpret $ \case
 -- Interprets both FileSystemRead and FileSystemWrite
 filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemRead : FileSystemWrite : r) a -> Sem r a
 filesystemIO = filesystemWriteIO . filesystemReadIO
+
+--------------------------------------------------------------------------------
+-- FileWatcher Effect
+--------------------------------------------------------------------------------
+
+-- | File watching effect for tracking changes to accessed files
+-- This effect allows tracking filesystem changes independently of read/write operations
+-- Can be composed with FileSystemRead/Write via intercept to automatically watch accessed files
+data FileWatcher (m :: Type -> Type) a where
+    -- | Register a file path for change tracking
+    WatchFile :: FilePath -> FileWatcher m ()
+
+    -- | Get list of watched files that have changed since last check
+    -- Returns [(FilePath, OldContent, NewContent)] for each changed file
+    GetChangedFiles :: FileWatcher m [(FilePath, ByteString, ByteString)]
+
+    -- | Clear the list of watched files
+    ClearWatched :: FileWatcher m ()
+
+    -- | Stop watching a specific file
+    UnwatchFile :: FilePath -> FileWatcher m ()
+
+makeSem ''FileWatcher
+
+-- | Intercept FileSystemRead operations to automatically watch accessed files
+-- Usage: interceptFileAccess . runApp
+-- Requires FileWatcher to be available in the effect stack
+interceptFileAccessRead :: Members '[FileSystemRead, FileWatcher] r => Sem r a -> Sem r a
+interceptFileAccessRead = intercept @FileSystemRead $ \case
+    ReadFile path -> do
+        watchFile path
+        send (ReadFile path)
+    ListFiles path -> send (ListFiles path)
+    FileExists path -> send (FileExists path)
+    IsDirectory path -> send (IsDirectory path)
+    Glob base pat -> send (Glob base pat)
+
+-- | Intercept FileSystemWrite operations to automatically watch written files
+-- Watch AFTER the write completes so we don't immediately detect our own write as a change
+interceptFileAccessWrite :: Members '[FileSystemWrite, FileWatcher] r => Sem r a -> Sem r a
+interceptFileAccessWrite = intercept @FileSystemWrite $ \case
+    WriteFile path content -> do
+        result <- send (WriteFile path content)
+        -- Watch after write completes to avoid triggering on our own write
+        watchFile path
+        return result
+
+-- | State for the FileWatcher interpreter
+data WatcherState = WatcherState
+    { watchedFiles :: !(Map FilePath (UTCTime, ByteString))  -- FilePath -> (ModTime, LastContent)
+    }
+
+emptyWatcherState :: WatcherState
+emptyWatcherState = WatcherState mempty
+
+-- | IO interpreter for FileWatcher effect
+-- Tracks file modification times and content to detect changes
+fileWatcherIO :: HasCallStack => Members '[Embed IO, Logging] r => Sem (FileWatcher : r) a -> Sem r a
+fileWatcherIO action = evalState emptyWatcherState $ reinterpret (\case
+        WatchFile path -> do
+            -- Get current mtime and content
+            -- If file is already watched, this resets the modification time (user requirement)
+            mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime path
+            case mtimeResult of
+                Left err -> info $ fromString $ "Failed to watch file " ++ path ++ ": " ++ show err
+                Right mtime -> do
+                    contentResult <- embed $ tryIOError $ BS.readFile path
+                    case contentResult of
+                        Left err -> info $ fromString $ "Failed to read file content for watching " ++ path ++ ": " ++ show err
+                        Right content -> do
+                            WatcherState watched <- get @WatcherState
+                            put $ WatcherState $ Map.insert path (mtime, content) watched
+                            info $ fromString $ "Now watching file: " ++ path
+
+        GetChangedFiles -> do
+            WatcherState watched <- get @WatcherState
+            -- Check each watched file for changes
+            changedFiles <- embed $ fmap catMaybes $ forM (Map.toList watched) $ \(path, (oldMtime, oldContent)) -> do
+                mtimeResult <- tryIOError $ System.Directory.getModificationTime path
+                case mtimeResult of
+                    Left _ -> return Nothing  -- File no longer exists or can't be accessed
+                    Right newMtime
+                        | newMtime > oldMtime -> do
+                            -- File was modified, re-read content
+                            contentResult <- tryIOError $ BS.readFile path
+                            case contentResult of
+                                Left _ -> return Nothing
+                                Right newContent
+                                    | newContent /= oldContent -> return $ Just (path, oldContent, newContent)
+                                    | otherwise -> return Nothing
+                        | otherwise -> return Nothing
+
+            -- Update state with new mtimes and content for changed files
+            updatedWithMtimes <- embed $ fmap Map.fromList $ forM changedFiles $ \(path, _oldContent, newContent) -> do
+                mtime <- System.Directory.getModificationTime path
+                return (path, (mtime, newContent))
+
+            WatcherState currentWatched <- get @WatcherState
+            let finalWatched = Map.union updatedWithMtimes currentWatched
+            put $ WatcherState finalWatched
+
+            return changedFiles
+
+        ClearWatched -> do
+            put emptyWatcherState
+            info $ fromString "Cleared all watched files"
+
+        UnwatchFile path -> do
+            WatcherState watched <- get @WatcherState
+            put $ WatcherState $ Map.delete path watched
+            info $ fromString $ "Stopped watching file: " ++ path
+    ) action
+
+-- | No-op interpreter for FileWatcher (for CLI or other contexts where watching is not needed)
+fileWatcherNoop :: Sem (FileWatcher : r) a -> Sem r a
+fileWatcherNoop = interpret $ \case
+    WatchFile _ -> return ()
+    GetChangedFiles -> return []
+    ClearWatched -> return ()
+    UnwatchFile _ -> return ()
