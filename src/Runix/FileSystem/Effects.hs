@@ -12,13 +12,13 @@
 module Runix.FileSystem.Effects where
 import Data.Kind (Type)
 import Polysemy
-import Polysemy.State (State, get, put, evalState)
+import Polysemy.State (get, put, runState)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Prelude hiding (readFile, writeFile)
 import Polysemy.Fail
 import System.FilePath
-import Data.List (isPrefixOf, foldl')
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
@@ -210,6 +210,9 @@ data FileWatcher (m :: Type -> Type) a where
     -- | Stop watching a specific file
     UnwatchFile :: FilePath -> FileWatcher m ()
 
+    -- | Get list of all currently watched files (for debugging)
+    GetWatchedFiles :: FileWatcher m [FilePath]
+
 makeSem ''FileWatcher
 
 -- | Intercept FileSystemRead operations to automatically watch accessed files
@@ -245,34 +248,34 @@ emptyWatcherState = WatcherState mempty
 
 -- | IO interpreter for FileWatcher effect
 -- Tracks file modification times and content to detect changes
+-- Uses internal State that persists across the entire wrapped computation
 fileWatcherIO :: HasCallStack => Members '[Embed IO, Logging] r => Sem (FileWatcher : r) a -> Sem r a
-fileWatcherIO action = evalState emptyWatcherState $ reinterpret (\case
+fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\case
         WatchFile path -> do
             -- Get current mtime and content
             -- If file is already watched, this resets the modification time (user requirement)
             mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime path
             case mtimeResult of
-                Left err -> info $ fromString $ "Failed to watch file " ++ path ++ ": " ++ show err
+                Left _ -> return ()  -- Silently ignore files that can't be watched
                 Right mtime -> do
                     contentResult <- embed $ tryIOError $ BS.readFile path
                     case contentResult of
-                        Left err -> info $ fromString $ "Failed to read file content for watching " ++ path ++ ": " ++ show err
+                        Left _ -> return ()  -- Silently ignore files that can't be read
                         Right content -> do
                             WatcherState watched <- get @WatcherState
                             put $ WatcherState $ Map.insert path (mtime, content) watched
-                            info $ fromString $ "Now watching file: " ++ path
 
         GetChangedFiles -> do
             WatcherState watched <- get @WatcherState
             -- Check each watched file for changes
-            changedFiles <- embed $ fmap catMaybes $ forM (Map.toList watched) $ \(path, (oldMtime, oldContent)) -> do
-                mtimeResult <- tryIOError $ System.Directory.getModificationTime path
+            changedFiles <- fmap catMaybes $ forM (Map.toList watched) $ \(path, (oldMtime, oldContent)) -> do
+                mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime path
                 case mtimeResult of
                     Left _ -> return Nothing  -- File no longer exists or can't be accessed
                     Right newMtime
                         | newMtime > oldMtime -> do
                             -- File was modified, re-read content
-                            contentResult <- tryIOError $ BS.readFile path
+                            contentResult <- embed $ tryIOError $ BS.readFile path
                             case contentResult of
                                 Left _ -> return Nothing
                                 Right newContent
@@ -299,6 +302,10 @@ fileWatcherIO action = evalState emptyWatcherState $ reinterpret (\case
             WatcherState watched <- get @WatcherState
             put $ WatcherState $ Map.delete path watched
             info $ fromString $ "Stopped watching file: " ++ path
+
+        GetWatchedFiles -> do
+            WatcherState watched <- get @WatcherState
+            return $ Map.keys watched
     ) action
 
 -- | No-op interpreter for FileWatcher (for CLI or other contexts where watching is not needed)
@@ -308,3 +315,4 @@ fileWatcherNoop = interpret $ \case
     GetChangedFiles -> return []
     ClearWatched -> return ()
     UnwatchFile _ -> return ()
+    GetWatchedFiles -> return []
