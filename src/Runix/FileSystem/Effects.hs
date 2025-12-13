@@ -92,8 +92,8 @@ basicResolvePath path =
   where
     step :: [FilePath] -> FilePath -> [FilePath]
     step acc "." = acc                    -- Skip current directory
-    step (_:rest) ".." = rest             -- Go up one level
     step [] ".." = []                     -- Can't go above root
+    step acc ".." = init acc              -- Go up one level (remove last component)
     step acc part = acc ++ [part]         -- Normal component
 
 -- | Limited access control for read operations
@@ -151,7 +151,9 @@ limitSubpathRead allowedPath action = do
           absoluteTarget = if isAbsolute targetPath
                           then basicResolvePath targetPath
                           else basicResolvePath (cwd </> targetPath)
-      in if splitPath normalizedAllowed `isPrefixOf` splitPath absoluteTarget
+          -- Add trailing separator to target as well for consistent comparison
+          normalizedTarget = addTrailingPathSeparator absoluteTarget
+      in if splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
          then AllowAccess
          else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
 

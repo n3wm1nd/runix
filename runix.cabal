@@ -144,4 +144,5 @@ test-suite runix-test
         http-client-conduit,
         data-default,
         containers,
-        filepath
+        filepath,
+        Glob
