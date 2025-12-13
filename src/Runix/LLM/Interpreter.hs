@@ -18,6 +18,7 @@ module Runix.LLM.Interpreter
   , interpretOpenAI
   , interpretOpenRouter
   , interpretLlamaCpp
+  , interpretZAI
     -- * Cancellation wrapper
   , withLLMCancellation
     -- * Generic model wrappers
@@ -424,6 +425,90 @@ interpretOpenRouter :: forall model s r a.
                     -> Sem r a
 interpretOpenRouter composableProvider model action =
     evalState (model, def) . interpretOpenRouterWithState composableProvider . raiseUnder $ action
+
+-- ============================================================================
+-- ZAI Interpreter
+-- ============================================================================
+
+-- ZAI uses OpenAI-compatible API with fixed endpoint
+data ZAIAuth = ZAIAuth { zaiApiKey :: String }
+
+instance RestEndpoint ZAIAuth where
+    apiroot _ = "https://api.z.ai/api/coding/paas/v4"
+    authheaders api =
+        [ ("Authorization", "Bearer " <> zaiApiKey api)
+        , ("Content-Type", "application/json")
+        ]
+
+-- Internal version with state management
+interpretZAIWithState :: forall model s r a.
+                       ( ModelName model
+                       , HasCodec (ProviderRequest model)
+                       , HasCodec (ProviderResponse model)
+                       , Monoid (ProviderRequest model)
+                       , ProviderResponse model ~ OpenAIResponse
+                       , Default s
+                       , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
+                       )
+                    => ComposableProvider model s
+                    -> Sem (LLM model : r) a
+                    -> Sem r a
+interpretZAIWithState composableProvider action = do
+    apiKey <- getSecret
+    let auth = ZAIAuth apiKey
+        withRestAPI = reinterpret2 (\case
+            QueryLLM configs messages -> do
+                -- Get current model/stack state from state
+                (model, stackState) <- get
+
+                -- Use universal-llm to build the request
+                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
+                let requestValue = toJSONViaCodec request
+
+                -- Check if streaming is enabled
+                let useStreaming = isStreamingEnabled configs
+
+                -- Make the API call and get typed response
+                providerResponse <- if useStreaming
+                    then do
+                        -- Streaming: reassemble SSE into typed response
+                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
+                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
+                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
+                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
+                    else do
+                        -- Non-streaming: parse JSON to typed response
+                        responseValue <- post (Endpoint "chat/completions") requestValue
+                        case parseEither parseJSONViaCodec responseValue of
+                            Left err -> fail $ "Failed to parse ZAI response: " ++ err
+                            Right resp -> return resp
+
+                -- Convert provider response to messages, threading state through
+                case fromProviderResponse composableProvider model configs stackState' providerResponse of
+                    Left err -> fail $ "LLM error: " ++ show err
+                    Right (stackState'', resultMessages) -> do
+                        -- Update state with new stack state
+                        put (model, stackState'')
+                        return resultMessages
+            ) action
+    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
+
+-- Public wrapper for backward compatibility
+interpretZAI :: forall model s r a.
+                       ( ModelName model
+                       , HasCodec (ProviderRequest model)
+                       , HasCodec (ProviderResponse model)
+                       , Monoid (ProviderRequest model)
+                       , ProviderResponse model ~ OpenAIResponse
+                       , Default s
+                       , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                       )
+                    => ComposableProvider model s
+                    -> model   -- ^ Model value
+                    -> Sem (LLM model : r) a
+                    -> Sem r a
+interpretZAI composableProvider model action =
+    evalState (model, def) . interpretZAIWithState composableProvider . raiseUnder $ action
 
 -- ============================================================================
 -- Llama.cpp Interpreter
