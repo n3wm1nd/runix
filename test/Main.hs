@@ -40,6 +40,7 @@ import Runix.Cancellation.Effects (cancelNoop)
 import Runix.Streaming.Effects (ignoreChunks)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
+import qualified FileSystemSecuritySpec
 
 -- ============================================================================
 -- Test Models
@@ -140,6 +141,8 @@ main = do
 
   -- Run tests with the loaded SSE responses
   hspec $ do
+    describe "FileSystem Security" FileSystemSecuritySpec.spec
+
     describe "SSE Parser Unit Tests" SSEParserSpec.spec
 
     describe "Runix OpenAI Streaming (Mocked HTTP)" OpenAIStreamingSpec.spec

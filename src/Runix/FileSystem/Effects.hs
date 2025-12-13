@@ -38,6 +38,7 @@ data FileSystemRead (m :: Type -> Type) a where
     FileExists :: FilePath -> FileSystemRead m (Either String Bool)
     IsDirectory :: FilePath -> FileSystemRead m (Either String Bool)
     Glob :: FilePath -> String -> FileSystemRead m (Either String [FilePath])  -- base path and pattern
+    GetCwd :: FileSystemRead m FilePath  -- Always succeeds
 
 -- | Public API functions that convert Either to Fail
 readFile :: Members [FileSystemRead, Fail] r => FilePath -> Sem r ByteString
@@ -55,6 +56,17 @@ isDirectory p = send (IsDirectory p) >>= either fail return
 glob :: Members [FileSystemRead, Fail] r => FilePath -> String -> Sem r [FilePath]
 glob base pat = send (Glob base pat) >>= either fail return
 
+getCwd :: Member FileSystemRead r => Sem r FilePath
+getCwd = send GetCwd
+
+-- | Helper function to make a path absolute using the filesystem's CWD
+makeAbsolute :: Members [FileSystemRead, Fail] r => FilePath -> Sem r FilePath
+makeAbsolute path
+    | isAbsolute path = return $ normalise path
+    | otherwise = do
+        cwd <- getCwd
+        return $ normalise (cwd </> path)
+
 -- | Write-only filesystem operations
 data FileSystemWrite (m :: Type -> Type) a where
     WriteFile :: FilePath -> ByteString -> FileSystemWrite m (Either String ())
@@ -70,7 +82,7 @@ type FileSystem = '[FileSystemRead, FileSystemWrite]
 data AccessPermission = AllowAccess | ForbidAccess String
 
 -- | Limited access control for read operations
-limitedAccessRead :: Member FileSystemRead r => (forall m x. FileSystemRead m x -> AccessPermission) -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
+limitedAccessRead :: (forall m x. FileSystemRead m x -> AccessPermission) -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
 limitedAccessRead isAllowed = intercept $ \action -> case isAllowed action of
     AllowAccess -> case action of
         ReadFile f -> send (ReadFile f)
@@ -78,15 +90,17 @@ limitedAccessRead isAllowed = intercept $ \action -> case isAllowed action of
         FileExists f -> send (FileExists f)
         IsDirectory f -> send (IsDirectory f)
         Glob base pat -> send (Glob base pat)
+        GetCwd -> send GetCwd
     ForbidAccess reason -> case action of
         ReadFile _ -> return (Left ("not allowed: " ++ reason))
         ListFiles _ -> return (Left ("not allowed: " ++ reason))
         FileExists _ -> return (Left ("not allowed: " ++ reason))
         IsDirectory _ -> return (Left ("not allowed: " ++ reason))
         Glob _ _ -> return (Left ("not allowed: " ++ reason))
+        GetCwd -> error ("GetCwd should always be allowed, but got: " ++ reason)
 
 -- | Limited access control for write operations
-limitedAccessWrite :: Member FileSystemWrite r => (forall m x. FileSystemWrite m x -> AccessPermission) -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
+limitedAccessWrite :: (forall m x. FileSystemWrite m x -> AccessPermission) -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
 limitedAccessWrite isAllowed = intercept $ \action -> case isAllowed action of
     AllowAccess -> case action of
         WriteFile f c -> send (WriteFile f c)
@@ -94,39 +108,65 @@ limitedAccessWrite isAllowed = intercept $ \action -> case isAllowed action of
         WriteFile _ _ -> return (Left ("not allowed: " ++ reason))
 
 -- | Limit read operations to a subpath
-limitSubpathRead :: Member FileSystemRead r => FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
-limitSubpathRead p = limitedAccessRead (\case
-    ReadFile sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
-    ListFiles sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
-    FileExists sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
-    IsDirectory sp | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
-    Glob base _pat | splitPath p `isPrefixOf` splitPath base -> AllowAccess
-    _ -> ForbidAccess $ "not in explicitly allowed path " ++ p
-    )
+-- Relative paths are resolved using the CWD obtained from the FileSystemRead effect
+limitSubpathRead :: FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
+limitSubpathRead allowedPath action = do
+  -- Get CWD first by calling through to the underlying effect
+  cwd <- send GetCwd
+
+  -- Now apply the interceptor with the CWD captured
+  limitedAccessRead (checkAccess cwd) action
+  where
+    checkAccess :: FilePath -> FileSystemRead m x -> AccessPermission
+    checkAccess cwd = \case
+      GetCwd -> AllowAccess  -- Always allow getting CWD
+      ReadFile sp -> checkPath cwd sp
+      ListFiles sp -> checkPath cwd sp
+      FileExists sp -> checkPath cwd sp
+      IsDirectory sp -> checkPath cwd sp
+      Glob base _pat -> checkPath cwd base
+
+    checkPath :: FilePath -> FilePath -> AccessPermission
+    checkPath cwd targetPath =
+      let normalizedAllowed = normalise allowedPath
+          -- Make target absolute using CWD if it's relative
+          absoluteTarget = if isAbsolute targetPath
+                          then normalise targetPath
+                          else normalise (cwd </> targetPath)
+      in if splitPath normalizedAllowed `isPrefixOf` splitPath absoluteTarget
+         then AllowAccess
+         else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
 
 -- | Limit write operations to a subpath
-limitSubpathWrite :: Member FileSystemWrite r => FilePath -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
+limitSubpathWrite :: FilePath -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
 limitSubpathWrite p = limitedAccessWrite (\case
-    WriteFile sp _c | splitPath p `isPrefixOf` splitPath sp -> AllowAccess
+    WriteFile sp _c | isSubpathOf p sp -> AllowAccess
     _ -> ForbidAccess $ "not in explicitly allowed path " ++ p
     )
+  where
+    isSubpathOf :: FilePath -> FilePath -> Bool
+    isSubpathOf allowedPath targetPath =
+      let normalizedAllowed = normalise allowedPath
+          normalizedTarget = normalise targetPath
+      in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
 
 -- | Chroot for read operations
-chrootSubpathRead :: Member FileSystemRead r => FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
+chrootSubpathRead :: FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
 chrootSubpathRead chrootPath = intercept $ \case
     ReadFile f -> send (ReadFile (chrootPath </> f))
     ListFiles f -> send (ListFiles (chrootPath </> f)) >>= return . fmap (fmap (makeRelative chrootPath))
     FileExists f -> send (FileExists (chrootPath </> f))
     IsDirectory f -> send (IsDirectory (chrootPath </> f))
     Glob base pat -> send (Glob (chrootPath </> base) pat) >>= return . fmap (fmap (makeRelative chrootPath))
+    GetCwd -> return chrootPath  -- Return chroot path as the "current" directory
 
 -- | Chroot for write operations
-chrootSubpathWrite :: Member FileSystemWrite r => FilePath -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
+chrootSubpathWrite :: FilePath -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
 chrootSubpathWrite chrootPath = intercept $ \case
     WriteFile f c -> send (WriteFile (chrootPath </> f) c)
 
 -- | Hide dotfiles for read operations
-hideDotfilesRead :: Member FileSystemRead r => Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
+hideDotfilesRead :: Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
 hideDotfilesRead = intercept $ \case
     ReadFile f | isDotfile f -> return (Left ("Access to dotfile denied: " ++ f))
                 | otherwise -> send (ReadFile f)
@@ -136,6 +176,7 @@ hideDotfilesRead = intercept $ \case
     IsDirectory f | isDotfile f -> return (Right False)
                   | otherwise -> send (IsDirectory f)
     Glob base pat -> send (Glob base pat) >>= return . fmap (Prelude.filter (not . isDotfile . takeFileName))
+    GetCwd -> send GetCwd
   where
     isDotfile :: FilePath -> Bool
     isDotfile path = case takeFileName path of
@@ -143,7 +184,7 @@ hideDotfilesRead = intercept $ \case
         _ -> False
 
 -- | Hide dotfiles for write operations
-hideDotfilesWrite :: Member FileSystemWrite r => Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
+hideDotfilesWrite :: Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
 hideDotfilesWrite = intercept $ \case
     WriteFile f c | isDotfile f -> return (Left ("Access to dotfile denied: " ++ f))
                   | otherwise -> send (WriteFile f c)
@@ -171,6 +212,9 @@ filesystemReadIO = interpret $ \case
     Glob basePath pattern -> do
         info $ fromString "glob pattern: " <> fromString pattern <> fromString " in " <> fromString basePath
         embed (tryIOError $ globFiles basePath pattern) >>= return . either (Left . show) Right
+    GetCwd -> do
+        info $ fromString "getting current working directory"
+        embed System.Directory.getCurrentDirectory
   where
     globFiles :: FilePath -> String -> IO [FilePath]
     globFiles base pat = do
@@ -227,6 +271,7 @@ interceptFileAccessRead = intercept @FileSystemRead $ \case
     FileExists path -> send (FileExists path)
     IsDirectory path -> send (IsDirectory path)
     Glob base pat -> send (Glob base pat)
+    GetCwd -> send GetCwd
 
 -- | Intercept FileSystemWrite operations to automatically watch written files
 -- Watch AFTER the write completes so we don't immediately detect our own write as a change
