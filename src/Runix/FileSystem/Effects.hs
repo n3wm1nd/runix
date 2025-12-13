@@ -81,6 +81,21 @@ type FileSystem = '[FileSystemRead, FileSystemWrite]
 
 data AccessPermission = AllowAccess | ForbidAccess String
 
+-- | Basic resolution of .. and . in paths
+-- This handles common cases but isn't perfect (doesn't handle symlinks, etc.)
+basicResolvePath :: FilePath -> FilePath
+basicResolvePath path =
+  let normalized = normalise path
+      parts = splitDirectories normalized
+      resolved = foldl step [] parts
+  in joinPath resolved
+  where
+    step :: [FilePath] -> FilePath -> [FilePath]
+    step acc "." = acc                    -- Skip current directory
+    step (_:rest) ".." = rest             -- Go up one level
+    step [] ".." = []                     -- Can't go above root
+    step acc part = acc ++ [part]         -- Normal component
+
 -- | Limited access control for read operations
 limitedAccessRead :: (forall m x. FileSystemRead m x -> AccessPermission) -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
 limitedAccessRead isAllowed = intercept $ \action -> case isAllowed action of
@@ -108,31 +123,34 @@ limitedAccessWrite isAllowed = intercept $ \action -> case isAllowed action of
         WriteFile _ _ -> return (Left ("not allowed: " ++ reason))
 
 -- | Limit read operations to a subpath
--- Relative paths are resolved using the CWD obtained from the FileSystemRead effect
+-- Relative paths are resolved using the actual CWD, then checked against allowedPath
 limitSubpathRead :: FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
 limitSubpathRead allowedPath action = do
-  -- Get CWD first by calling through to the underlying effect
+  -- Get the actual CWD from the underlying filesystem
   cwd <- send GetCwd
 
-  -- Now apply the interceptor with the CWD captured
-  limitedAccessRead (checkAccess cwd) action
+  -- Now intercept all operations and check them
+  intercept (\case
+    GetCwd -> send GetCwd  -- Don't modify GetCwd, pass it through
+    ReadFile sp -> checkAndSend cwd sp (ReadFile sp)
+    ListFiles sp -> checkAndSend cwd sp (ListFiles sp)
+    FileExists sp -> checkAndSend cwd sp (FileExists sp)
+    IsDirectory sp -> checkAndSend cwd sp (IsDirectory sp)
+    Glob base pat -> checkAndSend cwd base (Glob base pat)
+    ) action
   where
-    checkAccess :: FilePath -> FileSystemRead m x -> AccessPermission
-    checkAccess cwd = \case
-      GetCwd -> AllowAccess  -- Always allow getting CWD
-      ReadFile sp -> checkPath cwd sp
-      ListFiles sp -> checkPath cwd sp
-      FileExists sp -> checkPath cwd sp
-      IsDirectory sp -> checkPath cwd sp
-      Glob base _pat -> checkPath cwd base
+    checkAndSend cwd targetPath act =
+      case checkPath cwd targetPath of
+        AllowAccess -> send act
+        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
 
     checkPath :: FilePath -> FilePath -> AccessPermission
     checkPath cwd targetPath =
-      let normalizedAllowed = normalise allowedPath
-          -- Make target absolute using CWD if it's relative
+      let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
+          -- Resolve relative paths against actual CWD, then resolve .. and .
           absoluteTarget = if isAbsolute targetPath
-                          then normalise targetPath
-                          else normalise (cwd </> targetPath)
+                          then basicResolvePath targetPath
+                          else basicResolvePath (cwd </> targetPath)
       in if splitPath normalizedAllowed `isPrefixOf` splitPath absoluteTarget
          then AllowAccess
          else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
