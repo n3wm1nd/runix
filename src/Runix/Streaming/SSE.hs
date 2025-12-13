@@ -45,13 +45,14 @@ reassembleSSE deltaMerger initial sseBody =
 
 -- | Extract streaming content from a ByteString chunk (for streaming preview)
 -- Parses SSE format and extracts text/reasoning from both Anthropic and OpenAI streaming formats
-extractContentFromChunk :: BS.ByteString -> Maybe StreamingContent
+-- Returns ALL content chunks found in the SSE data (there may be multiple events per HTTP chunk)
+extractContentFromChunk :: BS.ByteString -> [StreamingContent]
 extractContentFromChunk chunk =
     let chunkLazy = BSL.fromStrict chunk
         values = parseSSE chunkLazy
-    in case values of
-        [] -> Nothing
-        (val:_) -> extractContentDelta val
+        -- Extract content from each SSE event, filtering out Nothings
+        contents = [c | val <- values, Just c <- [extractContentDelta val]]
+    in contents
   where
     extractContentDelta :: Value -> Maybe StreamingContent
     extractContentDelta (Aeson.Object obj) = do
@@ -113,7 +114,9 @@ extractContentFromChunk chunk =
 
 -- | Legacy function for backwards compatibility
 -- Extract just text (ignoring reasoning chunks)
+-- Returns the first text chunk found, if any
 extractTextFromChunk :: BS.ByteString -> Maybe Text
-extractTextFromChunk chunk = case extractContentFromChunk chunk of
-    Just (StreamingText text) -> Just text
-    _ -> Nothing
+extractTextFromChunk chunk =
+    case [text | StreamingText text <- extractContentFromChunk chunk] of
+        (text:_) -> Just text
+        [] -> Nothing

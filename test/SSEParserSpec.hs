@@ -25,21 +25,21 @@ spec = do
       let result = extractContentFromChunk chunk
 
       -- Should extract reasoning text
-      result `shouldBe` Just (StreamingReasoning "1")
+      result `shouldBe` [StreamingReasoning "1"]
 
     it "extracts reasoning from delta.reasoning field with multi-char text" $ do
       let chunk = BS.pack "data: {\"id\":\"gen-1765381969-tDN9trahXBXJBmjRjPF4\",\"provider\":\"AtlasCloud\",\"model\":\"z-ai/glm-4.5-air:free\",\"object\":\"chat.completion.chunk\",\"created\":1765381969,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"alyze\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"alyze\",\"format\":\"unknown\",\"index\":0}]},\"finish_reason\":null,\"native_finish_reason\":null,\"logprobs\":null}]}\n\n"
 
       let result = extractContentFromChunk chunk
 
-      result `shouldBe` Just (StreamingReasoning "alyze")
+      result `shouldBe` [StreamingReasoning "alyze"]
 
     it "extracts regular content when no reasoning present" $ do
       let chunk = BS.pack "data: {\"id\":\"gen-123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"
 
       let result = extractContentFromChunk chunk
 
-      result `shouldBe` Just (StreamingText "Hello")
+      result `shouldBe` [StreamingText "Hello"]
 
     it "reassembles OpenRouter reasoning chunks into reasoning_content field" $ do
       -- Simulate a streaming response with reasoning chunks
