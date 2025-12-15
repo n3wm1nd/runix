@@ -16,6 +16,8 @@ import qualified Data.Text as T
 import Data.String (fromString)
 import Data.Maybe (mapMaybe)
 import Control.Monad (filterM)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Polysemy
 import Polysemy.Fail (Fail)
 import GHC.Stack
@@ -48,7 +50,11 @@ grepIO = interpret $ \case
                 0 -> parseRipgrepOutput $ lines $ T.unpack $ CmdE.stdout result
                 _ -> []
         -- Filter results to only include files that pass FileSystem access controls
-        filterM (\match -> fileExists (matchFile match)) allMatches
+        -- Group by file first to check each file only once
+        let matchesByFile = Map.fromListWith (++) [(matchFile m, [m]) | m <- allMatches]
+        allowedFiles <- filterM fileExists (Map.keys matchesByFile)
+        let allowedSet = Map.fromList [(f, ()) | f <- allowedFiles]
+        return $ filter (\m -> Map.member (matchFile m) allowedSet) allMatches
   where
     parseRipgrepOutput :: [String] -> [GrepMatch]
     parseRipgrepOutput = mapMaybe parseLine
