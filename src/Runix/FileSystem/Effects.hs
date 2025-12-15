@@ -136,13 +136,36 @@ limitSubpathRead allowedPath action = do
     ListFiles sp -> checkAndSend cwd sp (ListFiles sp)
     FileExists sp -> checkAndSend cwd sp (FileExists sp)
     IsDirectory sp -> checkAndSend cwd sp (IsDirectory sp)
-    Glob base pat -> checkAndSend cwd base (Glob base pat)
+    Glob base pat -> checkAndSendGlob cwd base pat
     ) action
   where
     checkAndSend cwd targetPath act =
       case checkPath cwd targetPath of
         AllowAccess -> send act
         ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
+
+    checkAndSendGlob cwd base pat =
+      case checkPath cwd base of
+        AllowAccess -> do
+          -- Execute the glob operation
+          result <- send (Glob base pat)
+          -- Resolve base to absolute path (glob results are relative to base)
+          let absoluteBase = if isAbsolute base
+                            then basicResolvePath base
+                            else basicResolvePath (cwd </> base)
+          -- Filter the results to only include files within allowedPath
+          return $ fmap (filter (isGlobResultAllowed absoluteBase)) result
+        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
+
+    -- Check if a glob result (relative to base) is within the allowed path
+    isGlobResultAllowed :: FilePath -> FilePath -> Bool
+    isGlobResultAllowed absoluteBase relativePath =
+      -- Glob returns paths relative to base, resolve to absolute
+      let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
+          -- Resolve relative path against base to get absolute path
+          absoluteTarget = basicResolvePath (absoluteBase </> relativePath)
+          normalizedTarget = addTrailingPathSeparator absoluteTarget
+      in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
 
     checkPath :: FilePath -> FilePath -> AccessPermission
     checkPath cwd targetPath =

@@ -41,6 +41,7 @@ import Runix.Streaming.Effects (ignoreChunks)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
 import qualified FileSystemSecuritySpec
+import qualified DummyFileSystemSpec
 
 -- ============================================================================
 -- Test Models
@@ -141,6 +142,8 @@ main = do
 
   -- Run tests with the loaded SSE responses
   hspec $ do
+    describe "Dummy FileSystem" DummyFileSystemSpec.spec
+
     describe "FileSystem Security" FileSystemSecuritySpec.spec
 
     describe "SSE Parser Unit Tests" SSEParserSpec.spec

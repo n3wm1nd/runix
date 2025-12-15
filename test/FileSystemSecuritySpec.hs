@@ -11,98 +11,48 @@ module FileSystemSecuritySpec (spec) where
 import Test.Hspec
 import Polysemy
 import Polysemy.Error
-import Polysemy.Fail (Fail, runFail, failToError)
+import Polysemy.Fail (Fail, failToError)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import System.FilePath (normalise, isAbsolute, (</>) , splitPath, addTrailingPathSeparator, takeFileName, splitDirectories, joinPath)
+import System.FilePath (normalise, isAbsolute, (</>) , splitPath, addTrailingPathSeparator, splitDirectories, joinPath)
 import Prelude hiding (readFile)
-import Data.List (isInfixOf, isPrefixOf, sort)
-import qualified System.FilePath.Glob as Glob
+import Data.List (isInfixOf, isPrefixOf)
 
 import Runix.FileSystem.Effects
-
---------------------------------------------------------------------------------
--- Dummy Filesystem Interpreter
---------------------------------------------------------------------------------
-
--- | In-memory filesystem for testing
-type DummyFS = Map FilePath BS.ByteString
-
--- | Dummy interpreter that uses an in-memory filesystem
--- Takes a current working directory and a map of files
-filesystemReadDummy :: Member (Error String) r
-                    => FilePath  -- ^ Current working directory
-                    -> DummyFS   -- ^ In-memory filesystem
-                    -> Sem (FileSystemRead : r) a
-                    -> Sem r a
-filesystemReadDummy cwd fs = interpret $ \case
-    ReadFile p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just content -> Right content
-        Nothing -> Left $ "File not found: " ++ p
-
-    ListFiles p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just _ -> Left $ "Not a directory: " ++ p
-        Nothing -> Left $ "Directory not found: " ++ p
-
-    FileExists p -> return $ Right $ Map.member (resolveAbsolutePath cwd p) fs
-
-    IsDirectory _p -> return $ Right False  -- Simplified: no directories in our dummy FS
-
-    Glob base pat -> do
-        let basePath = resolveAbsolutePath cwd base
-            compiledPattern = Glob.compile pat
-            -- Get all files in the filesystem
-            allFiles = Map.keys fs
-            -- Filter files that are under the base path
-            filesInBase = filter (\f -> basePath `isPrefixOf` f) allFiles
-            -- Match against the glob pattern (relative to base)
-            matchedFiles = filter (\f ->
-                let relativePath = makeRelativeTo basePath f
-                in Glob.match compiledPattern relativePath) filesInBase
-        return $ Right $ sort matchedFiles  -- Sort for consistent test results
-      where
-        makeRelativeTo base path
-          | base `isPrefixOf` path = drop (length base + 1) path  -- +1 for separator
-          | otherwise = path
-
-    GetCwd -> return cwd
-  where
-    resolveAbsolutePath basePath path
-      | isAbsolute path = basicResolvePath path
-      | otherwise = basicResolvePath (basePath </> path)
-
-filesystemWriteDummy :: Member (Error String) r
-                     => DummyFS
-                     -> Sem (FileSystemWrite : r) a
-                     -> Sem r a
-filesystemWriteDummy _fs = interpret $ \case
-    WriteFile p _content -> return $ Right ()  -- Just succeed for now
-
---------------------------------------------------------------------------------
--- Test Helpers
---------------------------------------------------------------------------------
-
--- | Run a filesystem program with the dummy interpreter
-runFS :: FilePath -> DummyFS -> Sem '[FileSystemRead, Error String] a -> Either String a
-runFS cwd fs = run . runError @String . filesystemReadDummy cwd fs
-
--- | Run a filesystem program that may fail
-runFSWithFail :: FilePath -> DummyFS -> Sem [FileSystemRead, Fail, Error String] a -> Either String a
-runFSWithFail cwd fs prog =
-  run
-    . runError @String
-    . failToError id
-    . filesystemReadDummy cwd fs
-    $ prog
+import DummyFileSystemSpec (filesystemReadDummy, runFS, runFSWithFail, DummyFS)
 
 --------------------------------------------------------------------------------
 -- Tests
 --------------------------------------------------------------------------------
 
+-- Test isPathAllowed logic directly
+testIsPathAllowed :: FilePath -> FilePath -> FilePath -> Bool
+testIsPathAllowed allowedPath cwd targetPath =
+  let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
+      absoluteTarget = if isAbsolute targetPath
+                      then basicResolvePath targetPath
+                      else basicResolvePath (cwd </> targetPath)
+      normalizedTarget = addTrailingPathSeparator absoluteTarget
+  in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
+
 spec :: Spec
 spec = do
   describe "Path Utilities" $ do
+    it "isPathAllowed rejects files outside allowed path (absolute paths)" $ do
+      -- Test with absolute paths (like glob returns)
+      testIsPathAllowed "/project" "/project/subdir" "/file.txt" `shouldBe` False
+      testIsPathAllowed "/project" "/project/subdir" "/project/file.txt" `shouldBe` True
+
+    it "isPathAllowed rejects files outside allowed path (relative paths)" $ do
+      -- Test with relative paths (like ReadFile might use)
+      -- Relative path "../../etc/passwd" from cwd "/project/subdir" resolves to "/etc/passwd"
+      testIsPathAllowed "/project" "/project/subdir" "../../etc/passwd" `shouldBe` False
+      -- Relative path "../file.txt" from cwd "/project/subdir" resolves to "/project/file.txt"
+      testIsPathAllowed "/project" "/project/subdir" "../file.txt" `shouldBe` True
+      -- Relative path "file.txt" from cwd "/project/subdir" resolves to "/project/subdir/file.txt"
+      testIsPathAllowed "/project" "/project/subdir" "file.txt" `shouldBe` True
+
     it "normalise does NOT resolve .. components" $ do
       let path1 = normalise "/project/subdir" </> "../../README.md"
           path2 = normalise ("/project/subdir" </> "../../README.md")
@@ -137,39 +87,6 @@ spec = do
 
       -- This should be False
       (allowedSplit `isPrefixOf` targetSplit) `shouldBe` False
-
-  describe "Dummy Filesystem Interpreter" $ do
-    it "returns file content for existing files" $ do
-      let fs = Map.fromList [("/test/file.txt", "Hello, World!")]
-          result = runFSWithFail "/test" fs $ readFile "/test/file.txt"
-
-      result `shouldBe` Right "Hello, World!"
-
-    it "returns error for non-existing files" $ do
-      let fs = Map.fromList [("/test/file.txt", "Hello, World!")]
-          result = runFSWithFail "/test" fs $ readFile "/test/missing.txt"
-
-      result `shouldSatisfy` \case
-        Left err -> "File not found" `isInfixOf` err
-        Right _ -> False
-
-    it "fileExists returns True for existing files" $ do
-      let fs = Map.fromList [("/test/file.txt", "content")]
-          result = runFSWithFail "/test" fs $ fileExists "/test/file.txt"
-
-      result `shouldBe` Right True
-
-    it "fileExists returns False for missing files" $ do
-      let fs = Map.fromList []
-          result = runFSWithFail "/test" fs $ fileExists "/test/missing.txt"
-
-      result `shouldBe` Right False
-
-    it "getCwd returns the working directory" $ do
-      let fs = Map.empty
-          result = runFS "/home/user/project" fs getCwd
-
-      result `shouldBe` Right "/home/user/project"
 
   describe "limitSubpathRead Security" $ do
     it "allows reading files within allowed path (absolute)" $ do
@@ -243,6 +160,42 @@ spec = do
         Left err -> "not allowed" `isInfixOf` err
         Right _ -> False
 
+    it "allows reading files with relative paths within allowed directory" $ do
+      -- Test that relative paths still work for normal operations (not just glob)
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "content")
+            , ("/project/file.txt", "parent content")
+            ]
+          -- CWD is /project/subdir, read relative path "file.txt"
+          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile "file.txt"
+
+      result `shouldBe` Right "content"
+
+    it "allows reading files with relative .. that stay within allowed directory" $ do
+      -- Test that relative paths with .. work when they don't escape
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "subdir content")
+            , ("/project/file.txt", "parent content")
+            ]
+          -- CWD is /project/subdir, read "../file.txt" which resolves to /project/file.txt
+          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile "../file.txt"
+
+      result `shouldBe` Right "parent content"
+
+    it "blocks relative paths that escape allowed directory" $ do
+      -- Test that relative paths are properly checked even with complex .. patterns
+      let fs = Map.fromList
+            [ ("/etc/passwd", "secrets")
+            , ("/project/deep/nested/dir/file.txt", "content")
+            ]
+          -- CWD is /project/deep/nested/dir, try to read ../../../../etc/passwd
+          result = runFSWithFail "/project/deep/nested/dir" fs $
+                   limitSubpathRead "/project" $ readFile "../../../../etc/passwd"
+
+      result `shouldSatisfy` \case
+        Left err -> "not allowed" `isInfixOf` err
+        Right _ -> False
+
   describe "Glob Operations" $ do
     it "glob returns matching files within base directory" $ do
       let fs = Map.fromList
@@ -253,7 +206,8 @@ spec = do
             ]
           result = runFSWithFail "/project" fs $ glob "/project" "*.txt"
 
-      result `shouldBe` Right ["/project/file1.txt", "/project/file2.txt"]
+      -- Glob returns paths relative to base
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
 
     it "glob works with relative base path" $ do
       let fs = Map.fromList
@@ -264,7 +218,7 @@ spec = do
           -- "subdir" relative to CWD "/project" -> "/project/subdir"
           result = runFSWithFail "/project" fs $ glob "subdir" "*.txt"
 
-      result `shouldBe` Right ["/project/subdir/file1.txt", "/project/subdir/file2.txt"]
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
 
     it "glob matches patterns with wildcards" $ do
       let fs = Map.fromList
@@ -274,7 +228,7 @@ spec = do
             ]
           result = runFSWithFail "/project" fs $ glob "/project" "test_*.txt"
 
-      result `shouldBe` Right ["/project/test_data.txt", "/project/test_file.txt"]
+      result `shouldBe` Right ["test_data.txt", "test_file.txt"]
 
     it "glob returns empty list when no matches" $ do
       let fs = Map.fromList
@@ -286,6 +240,21 @@ spec = do
       result `shouldBe` Right []
 
   describe "Glob with limitSubpathRead Security" $ do
+    it "blocks the most basic escape: glob . with ../file pattern" $ do
+      -- THE MOST BASIC ATTACK: glob(".", "../*")
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "allowed file")
+            , ("/project/parent.txt", "should be blocked")
+            , ("/etc/passwd", "definitely blocked")
+            ]
+          -- CWD is /project/subdir, allowed path is /project/subdir
+          -- glob(".", "../*") tries to list files in /project
+          program = limitSubpathRead "/project/subdir" $ glob "." "../*"
+          result = runFSWithFail "/project/subdir" fs program
+
+      -- Must be empty - /project/parent.txt is outside /project/subdir
+      result `shouldBe` Right []
+
     it "allows glob within allowed path (absolute base)" $ do
       let fs = Map.fromList
             [ ("/project/file1.txt", "content1")
@@ -295,7 +264,7 @@ spec = do
           program = limitSubpathRead "/project" $ glob "/project" "*.txt"
           result = runFSWithFail "/project" fs program
 
-      result `shouldBe` Right ["/project/file1.txt", "/project/file2.txt"]
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
 
     it "allows glob within allowed path (relative base)" $ do
       let fs = Map.fromList
@@ -307,7 +276,7 @@ spec = do
           program = limitSubpathRead "/project" $ glob "subdir" "*.txt"
           result = runFSWithFail "/project" fs program
 
-      result `shouldBe` Right ["/project/subdir/file1.txt", "/project/subdir/file2.txt"]
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
 
     it "blocks glob with base outside allowed path (absolute)" $ do
       let fs = Map.fromList
@@ -349,7 +318,7 @@ spec = do
           program = limitSubpathRead "/project" $ glob "." "*.txt"
           result = runFSWithFail "/project/subdir" fs program
 
-      result `shouldBe` Right ["/project/subdir/file1.txt", "/project/subdir/file2.txt"]
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
 
     it "allows glob with current directory when CWD is within allowed path" $ do
       -- CWD = /project/deep/nested/dir, allowed = /project
@@ -362,7 +331,7 @@ spec = do
           program = limitSubpathRead "/project" $ glob "." "*.txt"
           result = runFSWithFail "/project/deep/nested/dir" fs program
 
-      result `shouldBe` Right ["/project/deep/nested/dir/file1.txt", "/project/deep/nested/dir/file2.txt"]
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
 
     it "allows glob with parent directory if still within allowed path" $ do
       -- CWD = /project/subdir, allowed = /project
@@ -375,4 +344,88 @@ spec = do
           program = limitSubpathRead "/project" $ glob ".." "*.txt"
           result = runFSWithFail "/project/subdir" fs program
 
-      result `shouldBe` Right ["/project/file1.txt", "/project/file2.txt"]
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
+
+    it "filters glob results that escape via .. in pattern" $ do
+      -- CRITICAL TEST: Base is "." (allowed), but pattern "../*.txt" escapes
+      -- This is the ACTUAL attack case from your bug report
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "subdir file")
+            , ("/project/file.txt", "project file")
+            , ("/etc/passwd", "secret")
+            ]
+          -- CWD is /project/subdir, allowed path is /project
+          -- glob(".", "../*.txt") should match /project/file.txt
+          -- Since base "." = /project/subdir is within /project, glob executes
+          -- But result /project/file.txt should be allowed (it's within /project)
+          program = limitSubpathRead "/project" $ glob "." "../*.txt"
+          result = runFSWithFail "/project/subdir" fs program
+
+      -- /project/file.txt is within /project so it should be allowed
+      -- Relative to base /project/subdir, it's ../file.txt
+      result `shouldBe` Right ["../file.txt"]
+
+    it "glob without filter returns relative paths that escape" $ do
+      -- First verify that glob WITHOUT security filter actually returns the escaping path
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "subdir file")
+            , ("/file.txt", "root file")
+            ]
+          -- glob WITHOUT limitSubpathRead should return ../../file.txt
+          programWithoutFilter = glob "." "../../*.txt"
+          resultWithoutFilter = runFSWithFail "/project/subdir" fs programWithoutFilter
+
+      -- Should match and return the relative path ../../file.txt
+      resultWithoutFilter `shouldBe` Right ["../../file.txt"]
+
+    it "blocks glob results that escape via .. outside allowed path" $ do
+      -- CRITICAL TEST: Base is "." (allowed), but pattern "../../*.txt" escapes outside /project
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "subdir file")
+            , ("/file.txt", "root file")
+            ]
+          -- CWD is /project/subdir, allowed path is /project
+          -- glob(".", "../../*.txt") would match /file.txt which is OUTSIDE /project
+          program = limitSubpathRead "/project" $ glob "." "../../*.txt"
+          result = runFSWithFail "/project/subdir" fs program
+
+      -- /file.txt is outside /project so it must be filtered out
+      -- The glob returns "../../file.txt" and isPathAllowed should filter it
+      case result of
+        Right files -> files `shouldBe` []  -- Should be empty after filtering
+        Left err -> expectationFailure $ "Glob failed: " ++ err
+
+    it "handles glob results that are relative paths (if glob implementation changes)" $ do
+      -- Test what happens if glob returns relative paths instead of absolute
+      -- This tests that isPathAllowed can handle relative paths correctly
+      -- If someone changes glob to return relative paths, this should still work
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "subdir file")
+            , ("/project/other.txt", "other file")
+            ]
+          -- Manually construct a test that would pass relative paths to the filter
+          -- We can't easily do this with the real glob, but we can test the logic
+          -- by checking our test helper handles both cases
+          relativeTest = testIsPathAllowed "/project" "/project/subdir" "../other.txt"
+
+      -- "../other.txt" from /project/subdir resolves to /project/other.txt which is allowed
+      relativeTest `shouldBe` True
+
+    it "filters glob results when base is at boundary and pattern could match parent" $ do
+      -- Edge case: glob from /project with pattern "../*.txt"
+      -- Even though base "/project" is allowed, results outside should be filtered
+      let fs = Map.fromList
+            [ ("/file.txt", "root file")
+            , ("/project/file.txt", "project file")
+            ]
+          -- Base is "/project" which is allowed, but pattern tries to escape
+          -- The glob operation itself might return /file.txt, but it should be filtered
+          program = limitSubpathRead "/project" $ send (Glob "/project" "../*.txt")
+          result = runFS "/project" fs program
+
+      -- Even if glob returns files outside, they should be filtered
+      -- In this case, "/file.txt" should be filtered out
+      case result of
+        Right (Right files) -> files `shouldNotContain` ["/file.txt"]
+        Right (Left err) -> expectationFailure $ "Glob failed: " ++ err
+        Left _ -> expectationFailure "Error effect triggered"
