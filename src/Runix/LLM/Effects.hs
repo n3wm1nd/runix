@@ -24,6 +24,10 @@ import UniversalLLM
   , HasReasoning
   )
 
+-- Re-export orphan instances for Tool system
+-- This ensures anyone using LLM effects automatically gets the instances they need
+import Runix.LLM.ToolInstances ()
+
 -- The LLM effect now works directly with universal-llm messages
 -- History management is MANUAL - just append and pass around
 data LLM model (m :: Type -> Type) a where
