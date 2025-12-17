@@ -181,17 +181,31 @@ limitSubpathRead allowedPath action = do
          else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
 
 -- | Limit write operations to a subpath
-limitSubpathWrite :: FilePath -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
-limitSubpathWrite p = limitedAccessWrite (\case
-    WriteFile sp _c | isSubpathOf p sp -> AllowAccess
-    _ -> ForbidAccess $ "not in explicitly allowed path " ++ p
-    )
+-- Requires FileSystemRead to be available to resolve relative paths against CWD
+limitSubpathWrite :: Members '[FileSystemRead, FileSystemWrite] r => FilePath -> Sem r a -> Sem r a
+limitSubpathWrite allowedPath action = do
+  -- Get the actual CWD from the underlying filesystem
+  cwd <- send GetCwd
+
+  -- Now intercept all write operations and check them
+  intercept @FileSystemWrite (\case
+    WriteFile targetPath content ->
+      case checkPath cwd targetPath of
+        AllowAccess -> send (WriteFile targetPath content)
+        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
+    ) action
   where
-    isSubpathOf :: FilePath -> FilePath -> Bool
-    isSubpathOf allowedPath targetPath =
-      let normalizedAllowed = normalise allowedPath
-          normalizedTarget = normalise targetPath
-      in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
+    checkPath :: FilePath -> FilePath -> AccessPermission
+    checkPath cwd targetPath =
+      let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
+          -- Resolve relative paths against actual CWD, then resolve .. and .
+          absoluteTarget = if isAbsolute targetPath
+                          then basicResolvePath targetPath
+                          else basicResolvePath (cwd </> targetPath)
+          normalizedTarget = addTrailingPathSeparator absoluteTarget
+      in if splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
+         then AllowAccess
+         else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
 
 -- | Chroot for read operations
 chrootSubpathRead :: FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
