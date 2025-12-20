@@ -11,7 +11,7 @@ import qualified Data.Aeson as Aeson
 import Data.Default (def)
 import Runix.Streaming.SSE (extractContentFromChunk, StreamingContent(..), reassembleSSE)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAISuccessResponse)
-import UniversalLLM.Core.Types (Message(..), Model(..), fromProviderResponse, providerReasoningTools, chainProviders, cpFromResponse)
+import UniversalLLM.Core.Types (Message(..), Model(..), fromProviderResponse)
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 import UniversalLLM.Providers.OpenAI (OpenRouter(..))
 
