@@ -1,3 +1,4 @@
+{-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE GADTs #-}
@@ -9,7 +10,26 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Runix.LLM.Effects where
+module Runix.LLM.Effects
+  ( -- * LLM Effect
+    LLM(..)
+  , queryLLM
+
+    -- * Convenience functions
+  , askLLM
+  , askLLMWithReasoning
+  , continueConversation
+  , extractThinking
+  , askLLMWithThinking
+
+    -- * Re-exports from UniversalLLM
+  , Message(..)
+  , ModelConfig(..)
+  , HasReasoning
+
+    -- * Tool system (safe for Safe modules to use)
+  , LLMTool(..)
+  ) where
 
 import Polysemy
 import Polysemy.Fail
@@ -23,6 +43,9 @@ import UniversalLLM
   , ModelConfig(..)
   , HasReasoning
   )
+
+-- Re-export tool system
+import UniversalLLM.Core.Tools (LLMTool(..))
 
 -- Re-export orphan instances for Tool system
 -- This ensures anyone using LLM effects automatically gets the instances they need
