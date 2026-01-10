@@ -64,6 +64,7 @@ library
         Runix.Secret.Effects,
         Runix.Logging.Effects,
         Runix.FileSystem.Effects,
+        Runix.FileSystem.Project.Effects,
         Runix.Grep.Effects,
         Runix.Bash.Effects,
         Runix.Cmd.Effects,
@@ -116,6 +117,7 @@ test-suite runix-test
                     , OpenAIStreamingSpec
                     , SSEParserSpec
                     , FileSystemSecuritySpec
+                    , FileSystemProjectSpec
                     , DummyFileSystemSpec
     autogen-modules:  Paths_runix
 

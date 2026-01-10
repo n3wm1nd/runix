@@ -41,6 +41,7 @@ import Runix.Streaming.Effects (ignoreChunks)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
 import qualified FileSystemSecuritySpec
+import qualified FileSystemProjectSpec
 import qualified DummyFileSystemSpec
 
 -- ============================================================================
@@ -145,6 +146,8 @@ main = do
     describe "Dummy FileSystem" DummyFileSystemSpec.spec
 
     describe "FileSystem Security" FileSystemSecuritySpec.spec
+
+    describe "FileSystem Project Effects" FileSystemProjectSpec.spec
 
     describe "SSE Parser Unit Tests" SSEParserSpec.spec
 
