@@ -8,8 +8,8 @@
 
 module DummyFileSystemSpec
   ( spec
-  , DummyFS
-  , filesystemReadDummy
+  , InMemoryFS
+  , filesystemReadInMemory
   , runFS
   , runFSWithFail
   ) where
@@ -17,119 +17,31 @@ module DummyFileSystemSpec
 import Test.Hspec
 import Polysemy
 import Polysemy.Error
-import Polysemy.Fail (Fail, runFail, failToError)
+import Polysemy.Fail (Fail, failToError)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import System.FilePath (normalise, isAbsolute, (</>) , splitPath, addTrailingPathSeparator, takeFileName, takeDirectory, splitDirectories, joinPath)
 import Prelude hiding (readFile)
-import Data.List (isInfixOf, isPrefixOf, sort)
-import qualified System.FilePath.Glob as Glob
+import Data.List (isInfixOf)
 
-import Runix.FileSystem.Effects
-
---------------------------------------------------------------------------------
--- Dummy Filesystem Interpreter
---------------------------------------------------------------------------------
-
--- | In-memory filesystem for testing
-type DummyFS = Map FilePath BS.ByteString
-
--- | Dummy interpreter that uses an in-memory filesystem
--- Takes a current working directory and a map of files
-filesystemReadDummy :: Member (Error String) r
-                    => FilePath  -- ^ Current working directory
-                    -> DummyFS   -- ^ In-memory filesystem
-                    -> Sem (FileSystemRead : r) a
-                    -> Sem r a
-filesystemReadDummy cwd fs = interpret $ \case
-    ReadFile p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just content -> Right content
-        Nothing -> Left $ "File not found: " ++ p
-
-    ListFiles p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just _ -> Left $ "Not a directory: " ++ p
-        Nothing -> Left $ "Directory not found: " ++ p
-
-    FileExists p -> return $ Right $ Map.member (resolveAbsolutePath cwd p) fs
-
-    IsDirectory _p -> return $ Right False  -- Simplified: no directories in our dummy FS
-
-    Glob base pat -> do
-        -- Glob works like this:
-        -- 1. Resolve base path (absolute or relative to cwd)
-        -- 2. Pattern can be absolute or relative
-        -- 3. If pattern is absolute, use it directly
-        -- 4. If pattern is relative, it's relative to base
-        -- 5. Return paths as they appear relative to base
-        let basePath = resolveAbsolutePath cwd base
-
-            -- Determine the search directory:
-            -- If pattern starts with /, it's absolute
-            -- Otherwise, resolve pattern relative to base
-            (searchDir, searchPattern) =
-              if isAbsolute pat
-              then
-                -- Absolute pattern: extract directory and pattern parts
-                let dir = takeDirectory pat
-                    patName = takeFileName pat
-                in (dir, patName)
-              else
-                -- Relative pattern: navigate from base according to pattern
-                -- Pattern can contain .. to go up from base
-                let patDir = takeDirectory pat
-                    patName = takeFileName pat
-                    resolvedDir = basicResolvePath (basePath </> patDir)
-                in (resolvedDir, patName)
-
-            -- Get all files in filesystem
-            allFiles = Map.keys fs
-
-            -- Compile the final search pattern (just the filename part)
-            finalPattern = Glob.compile searchPattern
-
-            -- Find files under searchDir that match the pattern name
-            matchedAbsolute = filter (\f ->
-              let dir = takeDirectory f
-                  name = takeFileName f
-              in dir == searchDir && Glob.match finalPattern name) allFiles
-
-            -- Convert to paths relative to base
-            matchedRelative = map (makeRelativeTo basePath) matchedAbsolute
-
-        return $ Right $ sort matchedRelative
-      where
-        makeRelativeTo :: FilePath -> FilePath -> FilePath
-        makeRelativeTo base target =
-          let baseParts = splitDirectories (normalise base)
-              targetParts = splitDirectories (normalise target)
-              common = length $ takeWhile id $ zipWith (==) baseParts targetParts
-              ups = replicate (length baseParts - common) ".."
-              downs = drop common targetParts
-              rel = ups ++ downs
-          in if null rel then "." else joinPath rel
-
-    GetCwd -> return cwd
-  where
-    resolveAbsolutePath basePath path
-      | isAbsolute path = basicResolvePath path
-      | otherwise = basicResolvePath (basePath </> path)
+import Runix.FileSystem.System.Effects
+import Runix.FileSystem.InMemory.Effects
 
 --------------------------------------------------------------------------------
 -- Test Helpers
 --------------------------------------------------------------------------------
 
--- | Run a filesystem program with the dummy interpreter
-runFS :: FilePath -> DummyFS -> Sem '[FileSystemRead, Error String] a -> Either String a
-runFS cwd fs = run . runError @String . filesystemReadDummy cwd fs
+-- | Run a filesystem program with the in-memory interpreter
+runFS :: FilePath -> InMemoryFS -> Sem '[FileSystemRead, Error String] a -> Either String a
+runFS cwd fs = run . runError @String . filesystemReadInMemory cwd fs
 
 -- | Run a filesystem program that may fail
-runFSWithFail :: FilePath -> DummyFS -> Sem [FileSystemRead, Fail, Error String] a -> Either String a
+runFSWithFail :: FilePath -> InMemoryFS -> Sem [FileSystemRead, Fail, Error String] a -> Either String a
 runFSWithFail cwd fs prog =
   run
     . runError @String
     . failToError id
-    . filesystemReadDummy cwd fs
+    . filesystemReadInMemory cwd fs
     $ prog
 
 --------------------------------------------------------------------------------

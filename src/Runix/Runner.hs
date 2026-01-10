@@ -18,7 +18,7 @@ module Runix.Runner (
     runUntrusted,
     SafeEffects,
     -- Re-exports from other modules
-    module Runix.FileSystem.Effects,
+    module Runix.FileSystem.System.Effects,
     module Runix.Grep.Effects,
     module Runix.Bash.Effects,
     module Runix.Cmd.Effects,
@@ -39,7 +39,7 @@ import Polysemy.Fail
 import Polysemy.Error
 
 -- Local modules
-import Runix.FileSystem.Effects
+import Runix.FileSystem.System.Effects
 import Runix.Grep.Effects
 import Runix.Bash.Effects
 import Runix.Cmd.Effects

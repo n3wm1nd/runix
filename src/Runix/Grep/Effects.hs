@@ -25,7 +25,7 @@ import GHC.Stack
 import Runix.Cmd.Effects (Cmd, cmdExec)
 import qualified Runix.Cmd.Effects as CmdE
 import Runix.Logging.Effects (Logging, info)
-import Runix.FileSystem.Effects (FileSystemRead, fileExists)
+import Runix.FileSystem.System.Effects (FileSystemRead, fileExists)
 
 -- | Grep search result
 data GrepMatch = GrepMatch

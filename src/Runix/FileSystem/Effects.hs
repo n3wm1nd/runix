@@ -9,8 +9,29 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
+-- | Parameterized filesystem effects for multiple project support
+--
+-- This module provides filesystem effects parameterized by a project type,
+-- allowing multiple independent filesystem views on the effect stack.
+--
+-- Example usage:
+--
+-- @
+-- newtype MainRepo = MainRepo FilePath
+-- newtype DepRepo = DepRepo FilePath
+--
+-- myFunc :: Members '[FileSystemRead MainRepo, FileSystemRead DepRepo] r
+--        => Sem r ()
+-- myFunc = do
+--   main <- readFile @MainRepo \"config.yaml\"
+--   dep <- readFile @DepRepo \"lib/code.hs\"
+-- @
 module Runix.FileSystem.Effects where
+
 import Data.Kind (Type)
 import Polysemy
 import Polysemy.State (get, put, runState)
@@ -19,374 +40,454 @@ import qualified Data.ByteString as BS
 import Prelude hiding (readFile, writeFile)
 import Polysemy.Fail
 import System.FilePath
-import Data.List (isPrefixOf)
+import Data.String (fromString)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
-import Data.String (fromString)
 import Data.Time (UTCTime)
-import GHC.Stack
 import Control.Monad (forM)
-import qualified System.Directory
-import qualified System.FilePath.Glob as Glob
+import qualified Data.List
+import GHC.Stack
+import qualified Runix.FileSystem.System.Effects as System
 import Runix.Logging.Effects (Logging, info)
-import System.IO.Error (tryIOError, userError)
+import qualified System.Directory
+import System.IO.Error (tryIOError)
 
--- | Read-only filesystem operations
-data FileSystemRead (m :: Type -> Type) a where
-    ReadFile :: FilePath -> FileSystemRead m (Either String ByteString)
-    ListFiles :: FilePath -> FileSystemRead m (Either String [FilePath])
-    FileExists :: FilePath -> FileSystemRead m (Either String Bool)
-    IsDirectory :: FilePath -> FileSystemRead m (Either String Bool)
-    Glob :: FilePath -> String -> FileSystemRead m (Either String [FilePath])  -- base path and pattern
-    GetCwd :: FileSystemRead m FilePath  -- Always succeeds
+-- | Core filesystem effect - provides project metadata and structure exploration
+-- This allows seeing the directory tree without reading file contents
+data FileSystem project (m :: Type -> Type) a where
+    -- | Get the project value/configuration
+    GetFileSystem :: FileSystem project m project
+    -- | List files in a directory
+    ListFiles :: FilePath -> FileSystem project m (Either String [FilePath])
+    -- | Check if a file exists
+    FileExists :: FilePath -> FileSystem project m (Either String Bool)
+    -- | Check if path is a directory
+    IsDirectory :: FilePath -> FileSystem project m (Either String Bool)
+    -- | Glob for files matching a pattern
+    Glob :: FilePath -> String -> FileSystem project m (Either String [FilePath])
+    -- | Get current working directory
+    GetCwd :: FileSystem project m (Either String FilePath)
+
+-- | Get the project configuration/value
+getFileSystem :: forall project r. Member (FileSystem project) r => Sem r project
+getFileSystem = send @(FileSystem project) GetFileSystem
+
+-- | Read file contents - separate from structure exploration
+data FileSystemRead project (m :: Type -> Type) a where
+    ReadFile :: FilePath -> FileSystemRead project m (Either String ByteString)
+
+-- | Write-only filesystem operations parameterized by project
+data FileSystemWrite project (m :: Type -> Type) a where
+    WriteFile :: FilePath -> ByteString -> FileSystemWrite project m (Either String ())
+    CreateDirectory :: Bool -> FilePath -> FileSystemWrite project m (Either String ())
+    Remove :: Bool -> FilePath -> FileSystemWrite project m (Either String ())
 
 -- | Public API functions that convert Either to Fail
-readFile :: Members [FileSystemRead, Fail] r => FilePath -> Sem r ByteString
-readFile p = send (ReadFile p) >>= either fail return
 
-listFiles :: Members [FileSystemRead, Fail] r => FilePath -> Sem r [FilePath]
-listFiles p = send (ListFiles p) >>= either fail return
+-- Filesystem structure operations
+listFiles :: forall project r. Members [FileSystem project, Fail] r => FilePath -> Sem r [FilePath]
+listFiles p = send @(FileSystem project) (ListFiles p) >>= either fail return
 
-fileExists :: Members [FileSystemRead, Fail] r => FilePath -> Sem r Bool
-fileExists p = send (FileExists p) >>= either fail return
+fileExists :: forall project r. Members [FileSystem project, Fail] r => FilePath -> Sem r Bool
+fileExists p = send @(FileSystem project) (FileExists p) >>= either fail return
 
-isDirectory :: Members [FileSystemRead, Fail] r => FilePath -> Sem r Bool
-isDirectory p = send (IsDirectory p) >>= either fail return
+isDirectory :: forall project r. Members [FileSystem project, Fail] r => FilePath -> Sem r Bool
+isDirectory p = send @(FileSystem project) (IsDirectory p) >>= either fail return
 
-glob :: Members [FileSystemRead, Fail] r => FilePath -> String -> Sem r [FilePath]
-glob base pat = send (Glob base pat) >>= either fail return
+glob :: forall project r. Members [FileSystem project, Fail] r => FilePath -> String -> Sem r [FilePath]
+glob base pat = send @(FileSystem project) (Glob base pat) >>= either fail return
 
-getCwd :: Member FileSystemRead r => Sem r FilePath
-getCwd = send GetCwd
+getCwd :: forall project r. Members [FileSystem project, Fail] r => Sem r FilePath
+getCwd = send @(FileSystem project) GetCwd >>= either fail return
 
--- | Helper function to make a path absolute using the filesystem's CWD
-makeAbsolute :: Members [FileSystemRead, Fail] r => FilePath -> Sem r FilePath
-makeAbsolute path
-    | isAbsolute path = return $ normalise path
-    | otherwise = do
-        cwd <- getCwd
-        return $ normalise (cwd </> path)
+-- File content operations
+readFile :: forall project r. Members [FileSystemRead project, Fail] r => FilePath -> Sem r ByteString
+readFile p = send @(FileSystemRead project) (ReadFile p) >>= either fail return
 
--- | Write-only filesystem operations
-data FileSystemWrite (m :: Type -> Type) a where
-    WriteFile :: FilePath -> ByteString -> FileSystemWrite m (Either String ())
-    CreateDirectory :: Bool -> FilePath -> FileSystemWrite m (Either String ())  -- Bool for createParents
-    Remove :: Bool -> FilePath -> FileSystemWrite m (Either String ())  -- Bool for recursive
+writeFile :: forall project r. Members [FileSystemWrite project, Fail] r => FilePath -> ByteString -> Sem r ()
+writeFile p d = send @(FileSystemWrite project) (WriteFile p d) >>= either fail return
 
--- | Public API function that converts Either to Fail
-writeFile :: Members [FileSystemWrite, Fail] r => FilePath -> ByteString -> Sem r ()
-writeFile p d = send (WriteFile p d) >>= either fail return
+createDirectory :: forall project r. Members [FileSystemWrite project, Fail] r => Bool -> FilePath -> Sem r ()
+createDirectory createParents p = send @(FileSystemWrite project) (CreateDirectory createParents p) >>= either fail return
 
--- | Create a directory, optionally creating parent directories
-createDirectory :: Members [FileSystemWrite, Fail] r => Bool -> FilePath -> Sem r ()
-createDirectory createParents p = send (CreateDirectory createParents p) >>= either fail return
-
--- | Remove a file or directory, optionally recursive for directories
-remove :: Members [FileSystemWrite, Fail] r => Bool -> FilePath -> Sem r ()
-remove recursive p = send (Remove recursive p) >>= either fail return
-
--- | Combined filesystem effect for backwards compatibility
--- This is a type alias that combines both read and write operations
-type FileSystem = '[FileSystemRead, FileSystemWrite]
-
-data AccessPermission = AllowAccess | ForbidAccess String
-
--- | Basic resolution of .. and . in paths
--- This handles common cases but isn't perfect (doesn't handle symlinks, etc.)
-basicResolvePath :: FilePath -> FilePath
-basicResolvePath path =
-  let normalized = normalise path
-      parts = splitDirectories normalized
-      resolved = foldl step [] parts
-  in joinPath resolved
-  where
-    step :: [FilePath] -> FilePath -> [FilePath]
-    step acc "." = acc                    -- Skip current directory
-    step [] ".." = []                     -- Can't go above root
-    step acc ".." = init acc              -- Go up one level (remove last component)
-    step acc part = acc ++ [part]         -- Normal component
-
--- | Limited access control for read operations
-limitedAccessRead :: (forall m x. FileSystemRead m x -> AccessPermission) -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
-limitedAccessRead isAllowed = intercept $ \action -> case isAllowed action of
-    AllowAccess -> case action of
-        ReadFile f -> send (ReadFile f)
-        ListFiles f -> send (ListFiles f)
-        FileExists f -> send (FileExists f)
-        IsDirectory f -> send (IsDirectory f)
-        Glob base pat -> send (Glob base pat)
-        GetCwd -> send GetCwd
-    ForbidAccess reason -> case action of
-        ReadFile _ -> return (Left ("not allowed: " ++ reason))
-        ListFiles _ -> return (Left ("not allowed: " ++ reason))
-        FileExists _ -> return (Left ("not allowed: " ++ reason))
-        IsDirectory _ -> return (Left ("not allowed: " ++ reason))
-        Glob _ _ -> return (Left ("not allowed: " ++ reason))
-        GetCwd -> error ("GetCwd should always be allowed, but got: " ++ reason)
-
--- | Limited access control for write operations
-limitedAccessWrite :: (forall m x. FileSystemWrite m x -> AccessPermission) -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
-limitedAccessWrite isAllowed = intercept $ \action -> case isAllowed action of
-    AllowAccess -> case action of
-        WriteFile f c -> send (WriteFile f c)
-        CreateDirectory p f -> send (CreateDirectory p f)
-        Remove r f -> send (Remove r f)
-    ForbidAccess reason -> case action of
-        WriteFile _ _ -> return (Left ("not allowed: " ++ reason))
-        CreateDirectory _ _ -> return (Left ("not allowed: " ++ reason))
-        Remove _ _ -> return (Left ("not allowed: " ++ reason))
-
--- | Limit read operations to a subpath
--- Relative paths are resolved using the actual CWD, then checked against allowedPath
-limitSubpathRead :: FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
-limitSubpathRead allowedPath action = do
-  -- Get the actual CWD from the underlying filesystem
-  cwd <- send GetCwd
-
-  -- Now intercept all operations and check them
-  intercept (\case
-    GetCwd -> send GetCwd  -- Don't modify GetCwd, pass it through
-    ReadFile sp -> checkAndSend cwd sp (ReadFile sp)
-    ListFiles sp -> checkAndSend cwd sp (ListFiles sp)
-    FileExists sp -> checkAndSend cwd sp (FileExists sp)
-    IsDirectory sp -> checkAndSend cwd sp (IsDirectory sp)
-    Glob base pat -> checkAndSendGlob cwd base pat
-    ) action
-  where
-    checkAndSend cwd targetPath act =
-      case checkPath cwd targetPath of
-        AllowAccess -> send act
-        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
-
-    checkAndSendGlob cwd base pat =
-      case checkPath cwd base of
-        AllowAccess -> do
-          -- Execute the glob operation
-          result <- send (Glob base pat)
-          -- Resolve base to absolute path (glob results are relative to base)
-          let absoluteBase = if isAbsolute base
-                            then basicResolvePath base
-                            else basicResolvePath (cwd </> base)
-          -- Filter the results to only include files within allowedPath
-          return $ fmap (filter (isGlobResultAllowed absoluteBase)) result
-        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
-
-    -- Check if a glob result (relative to base) is within the allowed path
-    isGlobResultAllowed :: FilePath -> FilePath -> Bool
-    isGlobResultAllowed absoluteBase relativePath =
-      -- Glob returns paths relative to base, resolve to absolute
-      let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
-          -- Resolve relative path against base to get absolute path
-          absoluteTarget = basicResolvePath (absoluteBase </> relativePath)
-          normalizedTarget = addTrailingPathSeparator absoluteTarget
-      in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
-
-    checkPath :: FilePath -> FilePath -> AccessPermission
-    checkPath cwd targetPath =
-      let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
-          -- Resolve relative paths against actual CWD, then resolve .. and .
-          absoluteTarget = if isAbsolute targetPath
-                          then basicResolvePath targetPath
-                          else basicResolvePath (cwd </> targetPath)
-          -- Add trailing separator to target as well for consistent comparison
-          normalizedTarget = addTrailingPathSeparator absoluteTarget
-      in if splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
-         then AllowAccess
-         else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
-
--- | Limit write operations to a subpath
--- Requires FileSystemRead to be available to resolve relative paths against CWD
-limitSubpathWrite :: Members '[FileSystemRead, FileSystemWrite] r => FilePath -> Sem r a -> Sem r a
-limitSubpathWrite allowedPath action = do
-  -- Get the actual CWD from the underlying filesystem
-  cwd <- send GetCwd
-
-  -- Now intercept all write operations and check them
-  intercept @FileSystemWrite (\case
-    WriteFile targetPath content ->
-      case checkPath cwd targetPath of
-        AllowAccess -> send (WriteFile targetPath content)
-        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
-    CreateDirectory createParents targetPath ->
-      case checkPath cwd targetPath of
-        AllowAccess -> send (CreateDirectory createParents targetPath)
-        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
-    Remove recursive targetPath ->
-      case checkPath cwd targetPath of
-        AllowAccess -> send (Remove recursive targetPath)
-        ForbidAccess reason -> return (Left ("not allowed: " ++ reason))
-    ) action
-  where
-    checkPath :: FilePath -> FilePath -> AccessPermission
-    checkPath cwd targetPath =
-      let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
-          -- Resolve relative paths against actual CWD, then resolve .. and .
-          absoluteTarget = if isAbsolute targetPath
-                          then basicResolvePath targetPath
-                          else basicResolvePath (cwd </> targetPath)
-          normalizedTarget = addTrailingPathSeparator absoluteTarget
-      in if splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
-         then AllowAccess
-         else ForbidAccess $ "not in explicitly allowed path " ++ allowedPath
-
--- | Chroot for read operations
-chrootSubpathRead :: FilePath -> Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
-chrootSubpathRead chrootPath = intercept $ \case
-    ReadFile f -> send (ReadFile (chrootPath </> f))
-    ListFiles f -> send (ListFiles (chrootPath </> f)) >>= return . fmap (fmap (makeRelative chrootPath))
-    FileExists f -> send (FileExists (chrootPath </> f))
-    IsDirectory f -> send (IsDirectory (chrootPath </> f))
-    Glob base pat -> send (Glob (chrootPath </> base) pat) >>= return . fmap (fmap (makeRelative chrootPath))
-    GetCwd -> return chrootPath  -- Return chroot path as the "current" directory
-
--- | Chroot for write operations
-chrootSubpathWrite :: FilePath -> Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
-chrootSubpathWrite chrootPath = intercept $ \case
-    WriteFile f c -> send (WriteFile (chrootPath </> f) c)
-    CreateDirectory p f -> send (CreateDirectory p (chrootPath </> f))
-    Remove r f -> send (Remove r (chrootPath </> f))
-
--- | Hide dotfiles for read operations
-hideDotfilesRead :: Sem (FileSystemRead : r) a -> Sem (FileSystemRead : r) a
-hideDotfilesRead = intercept $ \case
-    ReadFile f | isDotfile f -> return (Left ("Access to dotfile denied: " ++ f))
-                | otherwise -> send (ReadFile f)
-    ListFiles f -> send (ListFiles f) >>= return . fmap (Prelude.filter (not . isDotfile . takeFileName))
-    FileExists f | isDotfile f -> return (Right False)
-                 | otherwise -> send (FileExists f)
-    IsDirectory f | isDotfile f -> return (Right False)
-                  | otherwise -> send (IsDirectory f)
-    Glob base pat -> send (Glob base pat) >>= return . fmap (Prelude.filter (not . isDotfile . takeFileName))
-    GetCwd -> send GetCwd
-  where
-    isDotfile :: FilePath -> Bool
-    isDotfile path = case takeFileName path of
-        ('.':_) -> True
-        _ -> False
-
--- | Hide dotfiles for write operations
-hideDotfilesWrite :: Sem (FileSystemWrite : r) a -> Sem (FileSystemWrite : r) a
-hideDotfilesWrite = intercept $ \case
-    WriteFile f c | isDotfile f -> return (Left ("Access to dotfile denied: " ++ f))
-                  | otherwise -> send (WriteFile f c)
-    CreateDirectory p f | isDotfile f -> return (Left ("Access to dotfile denied: " ++ f))
-                        | otherwise -> send (CreateDirectory p f)
-    Remove r f | isDotfile f -> return (Left ("Access to dotfile denied: " ++ f))
-               | otherwise -> send (Remove r f)
-  where
-    isDotfile :: FilePath -> Bool
-    isDotfile path = case takeFileName path of
-        ('.':_) -> True
-        _ -> False
-
--- | IO interpreter for FileSystemRead effect
-filesystemReadIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemRead : r) a -> Sem r a
-filesystemReadIO = interpret $ \case
-    ReadFile p -> do
-        info $ fromString "reading file: " <> fromString p
-        embed (tryIOError $ BS.readFile p) >>= return . either (Left . show) Right
-    ListFiles p -> do
-        info $ fromString "listing files: " <> fromString p
-        embed (tryIOError $ System.Directory.listDirectory p) >>= return . either (Left . show) Right
-    FileExists p -> do
-        info $ fromString "checking file exists: " <> fromString p
-        embed (tryIOError $ System.Directory.doesFileExist p) >>= return . either (Left . show) Right
-    IsDirectory p -> do
-        info $ fromString "checking is directory: " <> fromString p
-        embed (tryIOError $ System.Directory.doesDirectoryExist p) >>= return . either (Left . show) Right
-    Glob basePath pattern -> do
-        info $ fromString "glob pattern: " <> fromString pattern <> fromString " in " <> fromString basePath
-        embed (tryIOError $ globFiles basePath pattern) >>= return . either (Left . show) Right
-    GetCwd -> do
-        info $ fromString "getting current working directory"
-        embed System.Directory.getCurrentDirectory
-  where
-    globFiles :: FilePath -> String -> IO [FilePath]
-    globFiles base pat = do
-        let compiledPattern = Glob.compile pat
-        Glob.globDir1 compiledPattern base
-
--- | IO interpreter for FileSystemWrite effect
-filesystemWriteIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemWrite : r) a -> Sem r a
-filesystemWriteIO = interpret $ \case
-    WriteFile p d -> do
-        info $ fromString "writing file: " <> fromString p
-        embed (tryIOError $ BS.writeFile p d) >>= return . either (Left . show) Right
-    CreateDirectory createParents p -> do
-        info $ fromString "creating directory: " <> fromString p <> (if createParents then fromString " (with parents)" else fromString "")
-        embed (tryIOError $ System.Directory.createDirectoryIfMissing createParents p) >>= return . either (Left . show) Right
-    Remove recursive p -> do
-        info $ fromString "removing: " <> fromString p <> (if recursive then fromString " (recursive)" else fromString "")
-        embed (tryIOError $ removePathSafe recursive p) >>= return . either (Left . show) Right
-  where
-    -- Safe removal that handles both files and directories
-    removePathSafe :: Bool -> FilePath -> IO ()
-    removePathSafe recursive path = do
-        isDir <- System.Directory.doesDirectoryExist path
-        isFile <- System.Directory.doesFileExist path
-        if isDir
-            then if recursive
-                 then System.Directory.removeDirectoryRecursive path
-                 else System.Directory.removeDirectory path
-            else if isFile
-                 then System.Directory.removeFile path
-                 else ioError $ userError $ "Path does not exist: " ++ path
-
--- | Combined IO interpreter for backwards compatibility
--- Interprets both FileSystemRead and FileSystemWrite
-filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemRead : FileSystemWrite : r) a -> Sem r a
-filesystemIO = filesystemWriteIO . filesystemReadIO
+remove :: forall project r. Members [FileSystemWrite project, Fail] r => Bool -> FilePath -> Sem r ()
+remove recursive p = send @(FileSystemWrite project) (Remove recursive p) >>= either fail return
 
 --------------------------------------------------------------------------------
--- FileWatcher Effect
+-- Project Path Extraction
+--------------------------------------------------------------------------------
+
+-- | Typeclass for extracting filesystem path from project types
+class HasProjectPath project where
+  -- | Get the root path of the project
+  getProjectPath :: project -> FilePath
+
+  -- | Convert a project-relative path to a system path (for external tools)
+  -- Default implementation: just append to project root
+  projectToSystemPath :: project -> FilePath -> FilePath
+  projectToSystemPath proj relPath = getProjectPath proj </> relPath
+
+-- | FilePath is its own project path
+instance HasProjectPath FilePath where
+  getProjectPath = id
+
+--------------------------------------------------------------------------------
+-- Local Filesystem Interpreter
+--------------------------------------------------------------------------------
+
+-- | Interpret filesystem effects for a local directory
+-- All paths are relative to the project root
+fileSystemLocal :: forall project r a.
+                   ( HasProjectPath project
+                   , Members [System.FileSystemRead, System.FileSystemWrite] r
+                   )
+                 => project
+                 -> Sem (FileSystemWrite project : FileSystemRead project : FileSystem project : r) a
+                 -> Sem r a
+fileSystemLocal project action =
+  let rootPath = getProjectPath project
+  in interpretFileSystem project
+     . interpretFileSystemRead rootPath
+     . interpretFileSystemWrite rootPath
+     $ action
+  where
+    interpretFileSystem :: Member System.FileSystemRead r'
+                        => project -> Sem (FileSystem project : r') a' -> Sem r' a'
+    interpretFileSystem proj = interpret $ \case
+      GetFileSystem -> return proj
+      GetCwd -> fmap Right (send System.GetCwd)
+      ListFiles p -> send (System.ListFiles (getProjectPath proj </> p))
+      FileExists p -> send (System.FileExists (getProjectPath proj </> p))
+      IsDirectory p -> send (System.IsDirectory (getProjectPath proj </> p))
+      Glob base pat -> send (System.Glob (getProjectPath proj </> base) pat)
+
+    interpretFileSystemRead :: Member System.FileSystemRead r'
+                            => FilePath -> Sem (FileSystemRead project : r') a' -> Sem r' a'
+    interpretFileSystemRead root = interpret $ \case
+      ReadFile p -> send (System.ReadFile (root </> p))
+
+    interpretFileSystemWrite :: Member System.FileSystemWrite r'
+                             => FilePath -> Sem (FileSystemWrite project : r') a' -> Sem r' a'
+    interpretFileSystemWrite root = interpret $ \case
+      WriteFile p d -> send (System.WriteFile (root </> p) d)
+      CreateDirectory createParents p -> send (System.CreateDirectory createParents (root </> p))
+      Remove recursive p -> send (System.Remove recursive (root </> p))
+
+--------------------------------------------------------------------------------
+-- Filters
+--------------------------------------------------------------------------------
+
+-- | A path filter predicate
+data PathFilter = PathFilter
+  { shouldInclude :: FilePath -> Bool
+  , filterName :: String  -- for error messages
+  }
+
+instance Semigroup PathFilter where
+  f1 <> f2 = PathFilter
+    { shouldInclude = \p -> shouldInclude f1 p && shouldInclude f2 p
+    , filterName = filterName f1 <> " + " <> filterName f2
+    }
+
+instance Monoid PathFilter where
+  mempty = PathFilter (const True) "no filter"
+
+-- | Apply a filter to filesystem structure operations
+-- Resolves all paths to absolute using GetCwd before checking the filter
+filterFileSystem :: forall project r a.
+                    Member (FileSystem project) r
+                 => PathFilter
+                 -> Sem r a
+                 -> Sem r a
+filterFileSystem filter = intercept $ \case
+  GetFileSystem -> send (GetFileSystem @project)
+  GetCwd -> send (GetCwd @project)
+
+  ListFiles p -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = resolveForCheck cwd p
+        if shouldInclude filter resolved
+          then do
+            result <- send (ListFiles @project p)
+            -- Also filter the results
+            return $ fmap (Prelude.filter (\f ->
+              let absF = resolveForCheck resolved f
+              in shouldInclude filter absF)) result
+          else return $ Left $ "Access denied: " ++ filterName filter
+
+  FileExists p -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = resolveForCheck cwd p
+        if shouldInclude filter resolved
+          then send (FileExists @project p)
+          else return $ Right False
+
+  IsDirectory p -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = resolveForCheck cwd p
+        if shouldInclude filter resolved
+          then send (IsDirectory @project p)
+          else return $ Right False
+
+  Glob base pat -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolvedBase = resolveForCheck cwd base
+        if shouldInclude filter resolvedBase
+          then do
+            result <- send (Glob @project base pat)
+            -- Filter the results
+            return $ fmap (Prelude.filter (\f ->
+              let absF = resolveForCheck resolvedBase f
+              in shouldInclude filter absF)) result
+          else return $ Left $ "Access denied: " ++ filterName filter
+  where
+    resolveForCheck cwd p
+      | isAbsolute p = System.basicResolvePath p
+      | otherwise = System.basicResolvePath (cwd </> p)
+
+-- | Apply a filter to filesystem read operations
+-- Resolves all paths to absolute using GetCwd before checking the filter
+filterRead :: forall project r a.
+              ( Member (FileSystemRead project) r
+              , Member (FileSystem project) r
+              )
+           => PathFilter
+           -> Sem r a
+           -> Sem r a
+filterRead filter = intercept $ \case
+  ReadFile p -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = if isAbsolute p
+                      then System.basicResolvePath p
+                      else System.basicResolvePath (cwd </> p)
+        if shouldInclude filter resolved
+          then send (ReadFile @project p)
+          else return $ Left $ "Access denied: " ++ filterName filter
+
+-- | Apply a filter to filesystem write operations
+-- Resolves all paths to absolute using GetCwd before checking the filter
+filterWrite :: forall project r a.
+               ( Member (FileSystemWrite project) r
+               , Member (FileSystem project) r
+               )
+            => PathFilter
+            -> Sem r a
+            -> Sem r a
+filterWrite filter = intercept $ \case
+  WriteFile p d -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = if isAbsolute p
+                      then System.basicResolvePath p
+                      else System.basicResolvePath (cwd </> p)
+        if shouldInclude filter resolved
+          then send (WriteFile @project p d)
+          else return $ Left $ "Access denied: " ++ filterName filter
+
+  CreateDirectory createParents p -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = if isAbsolute p
+                      then System.basicResolvePath p
+                      else System.basicResolvePath (cwd </> p)
+        if shouldInclude filter resolved
+          then send (CreateDirectory @project createParents p)
+          else return $ Left $ "Access denied: " ++ filterName filter
+
+  Remove recursive p -> do
+    cwdResult <- send (GetCwd @project)
+    case cwdResult of
+      Left err -> return $ Left err
+      Right cwd -> do
+        let resolved = if isAbsolute p
+                      then System.basicResolvePath p
+                      else System.basicResolvePath (cwd </> p)
+        if shouldInclude filter resolved
+          then send (Remove @project recursive p)
+          else return $ Left $ "Access denied: " ++ filterName filter
+
+--------------------------------------------------------------------------------
+-- Common Filters
+--------------------------------------------------------------------------------
+
+-- | Hide dotfiles (files/directories starting with '.')
+hideDotfiles :: PathFilter
+hideDotfiles = PathFilter
+  { shouldInclude = not . isDotfile . takeFileName
+  , filterName = "dotfiles are hidden"
+  }
+  where
+    isDotfile ('.':_) = True
+    isDotfile _ = False
+
+-- | Hide .git directory
+hideGit :: PathFilter
+hideGit = PathFilter
+  { shouldInclude = \p -> ".git" `notElem` splitPath p
+  , filterName = ".git directory is hidden"
+  }
+
+-- | Hide .claude directory
+hideClaude :: PathFilter
+hideClaude = PathFilter
+  { shouldInclude = \p -> ".claude" `notElem` splitPath p
+  , filterName = ".claude directory is hidden"
+  }
+
+-- | Filter to only allow paths within .claude directory or CLAUDE.md
+onlyClaude :: PathFilter
+onlyClaude = PathFilter
+  { shouldInclude = \p ->
+      let components = splitPath p
+      in any (\c -> c == ".claude" || c == ".claude/") components || p == "CLAUDE.md"
+  , filterName = "only .claude directory and CLAUDE.md are accessible"
+  }
+
+-- | Restrict access to a specific subpath (security filter)
+-- This checks that resolved absolute paths fall within the allowed path
+-- NOTE: The path passed to shouldInclude is already resolved to absolute by filterFileSystem
+limitToSubpath :: FilePath  -- ^ Allowed base path (should be absolute)
+               -> PathFilter
+limitToSubpath allowedPath = PathFilter
+  { shouldInclude = \p ->
+      let normalizedAllowed = addTrailingPathSeparator $ System.basicResolvePath allowedPath
+          -- Path is already resolved to absolute by filterFileSystem
+          normalizedTarget = addTrailingPathSeparator $ System.basicResolvePath p
+      in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
+  , filterName = "path is outside allowed directory " ++ allowedPath
+  }
+  where
+    isPrefixOf = Data.List.isPrefixOf
+
+--------------------------------------------------------------------------------
+-- Logging Wrappers
+--------------------------------------------------------------------------------
+
+-- | Add logging to filesystem structure operations
+loggingFileSystem :: forall project r a.
+                     ( HasCallStack
+                     , Member Logging r
+                     , Member (FileSystem project) r
+                     )
+                  => String  -- ^ Log prefix
+                  -> Sem r a
+                  -> Sem r a
+loggingFileSystem prefix = intercept $ \case
+  GetFileSystem -> send (GetFileSystem @project)
+  ListFiles p -> do
+    info $ fromString $ prefix <> "listing files: " <> p
+    send (ListFiles @project p)
+  FileExists p -> do
+    info $ fromString $ prefix <> "checking file exists: " <> p
+    send (FileExists @project p)
+  IsDirectory p -> do
+    info $ fromString $ prefix <> "checking is directory: " <> p
+    send (IsDirectory @project p)
+  Glob base pat -> do
+    info $ fromString $ prefix <> "glob pattern: " <> pat <> " in " <> base
+    send (Glob @project base pat)
+
+-- | Add logging to filesystem read operations
+loggingRead :: forall project r a.
+               ( HasCallStack
+               , Member Logging r
+               , Member (FileSystemRead project) r
+               )
+            => String  -- ^ Log prefix
+            -> Sem r a
+            -> Sem r a
+loggingRead prefix = intercept $ \case
+  ReadFile p -> do
+    info $ fromString $ prefix <> "reading file: " <> p
+    send (ReadFile @project p)
+
+-- | Add logging to filesystem write operations
+loggingWrite :: forall project r a.
+                ( HasCallStack
+                , Member Logging r
+                , Member (FileSystemWrite project) r
+                )
+             => String  -- ^ Log prefix
+             -> Sem r a
+             -> Sem r a
+loggingWrite prefix = intercept $ \case
+  WriteFile p d -> do
+    info $ fromString $ prefix <> "writing file: " <> p
+    send (WriteFile @project p d)
+  CreateDirectory createParents p -> do
+    info $ fromString $ prefix <> "creating directory: " <> p
+    send (CreateDirectory @project createParents p)
+  Remove recursive p -> do
+    info $ fromString $ prefix <> "removing: " <> p
+    send (Remove @project recursive p)
+
+--------------------------------------------------------------------------------
+-- FileWatcher Effect (Parameterized)
 --------------------------------------------------------------------------------
 
 -- | File watching effect for tracking changes to accessed files
--- This effect allows tracking filesystem changes independently of read/write operations
--- Can be composed with FileSystemRead/Write via intercept to automatically watch accessed files
-data FileWatcher (m :: Type -> Type) a where
-    -- | Register a file path for change tracking
-    WatchFile :: FilePath -> FileWatcher m ()
+-- Parameterized by project type, works with project-relative paths
+data FileWatcher project (m :: Type -> Type) a where
+    -- | Register a file path for change tracking (project-relative path)
+    WatchFile :: FilePath -> FileWatcher project m ()
 
     -- | Get list of watched files that have changed since last check
     -- Returns [(FilePath, OldContent, NewContent)] for each changed file
-    GetChangedFiles :: FileWatcher m [(FilePath, ByteString, ByteString)]
+    GetChangedFiles :: FileWatcher project m [(FilePath, ByteString, ByteString)]
 
     -- | Clear the list of watched files
-    ClearWatched :: FileWatcher m ()
+    ClearWatched :: FileWatcher project m ()
 
     -- | Stop watching a specific file
-    UnwatchFile :: FilePath -> FileWatcher m ()
+    UnwatchFile :: FilePath -> FileWatcher project m ()
 
     -- | Get list of all currently watched files (for debugging)
-    GetWatchedFiles :: FileWatcher m [FilePath]
+    GetWatchedFiles :: FileWatcher project m [FilePath]
 
 makeSem ''FileWatcher
 
 -- | Intercept FileSystemRead operations to automatically watch accessed files
--- Usage: interceptFileAccess . runApp
--- Requires FileWatcher to be available in the effect stack
-interceptFileAccessRead :: Members '[FileSystemRead, FileWatcher] r => Sem r a -> Sem r a
-interceptFileAccessRead = intercept @FileSystemRead $ \case
+interceptFileAccessRead :: forall project r a.
+                           Members '[FileSystemRead project, FileWatcher project] r
+                        => Sem r a -> Sem r a
+interceptFileAccessRead = intercept @(FileSystemRead project) $ \case
     ReadFile path -> do
-        watchFile path
-        send (ReadFile path)
-    ListFiles path -> send (ListFiles path)
-    FileExists path -> send (FileExists path)
-    IsDirectory path -> send (IsDirectory path)
-    Glob base pat -> send (Glob base pat)
-    GetCwd -> send GetCwd
+        watchFile @project path
+        send (ReadFile @project path)
 
 -- | Intercept FileSystemWrite operations to automatically watch written files
 -- Watch AFTER the write completes so we don't immediately detect our own write as a change
-interceptFileAccessWrite :: Members '[FileSystemWrite, FileWatcher] r => Sem r a -> Sem r a
-interceptFileAccessWrite = intercept @FileSystemWrite $ \case
+interceptFileAccessWrite :: forall project r a.
+                            Members '[FileSystemWrite project, FileWatcher project] r
+                         => Sem r a -> Sem r a
+interceptFileAccessWrite = intercept @(FileSystemWrite project) $ \case
     WriteFile path content -> do
-        result <- send (WriteFile path content)
+        result <- send (WriteFile @project path content)
         -- Watch after write completes to avoid triggering on our own write
-        watchFile path
+        watchFile @project path
         return result
+    CreateDirectory createParents path -> send (CreateDirectory @project createParents path)
+    Remove recursive path -> send (Remove @project recursive path)
 
 -- | State for the FileWatcher interpreter
 data WatcherState = WatcherState
@@ -399,16 +500,23 @@ emptyWatcherState = WatcherState mempty
 -- | IO interpreter for FileWatcher effect
 -- Tracks file modification times and content to detect changes
 -- Uses internal State that persists across the entire wrapped computation
-fileWatcherIO :: HasCallStack => Members '[Embed IO, Logging] r => Sem (FileWatcher : r) a -> Sem r a
+-- Converts project-relative paths to system paths for IO operations
+fileWatcherIO :: forall project r a.
+                 ( HasCallStack
+                 , HasProjectPath project
+                 , Members '[Embed IO, Logging, FileSystem project] r
+                 )
+              => Sem (FileWatcher project : r) a -> Sem r a
 fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\case
         WatchFile path -> do
+            project <- raise $ getFileSystem @project
+            let systemPath = projectToSystemPath project path
             -- Get current mtime and content
-            -- If file is already watched, this resets the modification time (user requirement)
-            mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime path
+            mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime systemPath
             case mtimeResult of
                 Left _ -> return ()  -- Silently ignore files that can't be watched
                 Right mtime -> do
-                    contentResult <- embed $ tryIOError $ BS.readFile path
+                    contentResult <- embed $ tryIOError $ BS.readFile systemPath
                     case contentResult of
                         Left _ -> return ()  -- Silently ignore files that can't be read
                         Right content -> do
@@ -416,16 +524,18 @@ fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\cas
                             put $ WatcherState $ Map.insert path (mtime, content) watched
 
         GetChangedFiles -> do
+            proj <- raise $ getFileSystem @project
             WatcherState watched <- get @WatcherState
             -- Check each watched file for changes
             changedFiles <- fmap catMaybes $ forM (Map.toList watched) $ \(path, (oldMtime, oldContent)) -> do
-                mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime path
+                let systemPath = projectToSystemPath proj path
+                mtimeResult <- embed $ tryIOError $ System.Directory.getModificationTime systemPath
                 case mtimeResult of
                     Left _ -> return Nothing  -- File no longer exists or can't be accessed
                     Right newMtime
                         | newMtime > oldMtime -> do
                             -- File was modified, re-read content
-                            contentResult <- embed $ tryIOError $ BS.readFile path
+                            contentResult <- embed $ tryIOError $ BS.readFile systemPath
                             case contentResult of
                                 Left _ -> return Nothing
                                 Right newContent
@@ -435,7 +545,8 @@ fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\cas
 
             -- Update state with new mtimes and content for changed files
             updatedWithMtimes <- embed $ fmap Map.fromList $ forM changedFiles $ \(path, _oldContent, newContent) -> do
-                mtime <- System.Directory.getModificationTime path
+                let systemPath = projectToSystemPath proj path
+                mtime <- System.Directory.getModificationTime systemPath
                 return (path, (mtime, newContent))
 
             WatcherState currentWatched <- get @WatcherState
@@ -446,12 +557,12 @@ fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\cas
 
         ClearWatched -> do
             put emptyWatcherState
-            info $ fromString "Cleared all watched files"
+            raise $ info $ fromString "Cleared all watched files"
 
         UnwatchFile path -> do
             WatcherState watched <- get @WatcherState
             put $ WatcherState $ Map.delete path watched
-            info $ fromString $ "Stopped watching file: " ++ path
+            raise $ info $ fromString $ "Stopped watching file: " ++ path
 
         GetWatchedFiles -> do
             WatcherState watched <- get @WatcherState
@@ -459,7 +570,7 @@ fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\cas
     ) action
 
 -- | No-op interpreter for FileWatcher (for CLI or other contexts where watching is not needed)
-fileWatcherNoop :: Sem (FileWatcher : r) a -> Sem r a
+fileWatcherNoop :: Sem (FileWatcher project : r) a -> Sem r a
 fileWatcherNoop = interpret $ \case
     WatchFile _ -> return ()
     GetChangedFiles -> return []

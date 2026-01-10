@@ -21,84 +21,21 @@ import Prelude hiding (readFile)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import qualified System.FilePath.Glob as Glob
 
-import Runix.FileSystem.Project.Effects
-import qualified Runix.FileSystem.Effects as System
+import Runix.FileSystem.Effects
+import qualified Runix.FileSystem.System.Effects as System
+import Runix.FileSystem.InMemory.Effects
 
 --------------------------------------------------------------------------------
--- Dummy Filesystem Interpreter for Testing
+-- In-Memory Filesystem for Testing
 --------------------------------------------------------------------------------
 
-type DummyFS = Map FilePath BS.ByteString
-
--- | Pure interpreter for System.FileSystemRead using in-memory map
-filesystemReadDummy :: Member (Error String) r
-                    => FilePath  -- ^ Current working directory
-                    -> DummyFS   -- ^ In-memory filesystem
-                    -> Sem (System.FileSystemRead : r) a
-                    -> Sem r a
-filesystemReadDummy cwd fs = interpret $ \case
-    System.ReadFile p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just content -> Right content
-        Nothing -> Left $ "File not found: " ++ p
-
-    System.ListFiles p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just _ -> Left $ "Not a directory: " ++ p
-        Nothing -> Left $ "Directory not found: " ++ p
-
-    System.FileExists p -> return $ Right $ Map.member (resolveAbsolutePath cwd p) fs
-
-    System.IsDirectory _p -> return $ Right False
-
-    System.Glob base pat -> do
-        let basePath = resolveAbsolutePath cwd base
-            (searchDir, searchPattern) =
-              if isAbsolute pat
-              then (takeDirectory pat, takeFileName pat)
-              else
-                let patDir = takeDirectory pat
-                    patName = takeFileName pat
-                    resolvedDir = System.basicResolvePath (basePath </> patDir)
-                in (resolvedDir, patName)
-
-            allFiles = Map.keys fs
-            finalPattern = Glob.compile searchPattern
-            matchedAbsolute = filter (\f ->
-              let dir = takeDirectory f
-                  name = takeFileName f
-              in dir == searchDir && Glob.match finalPattern name) allFiles
-
-            matchedRelative = map (makeRelativeTo basePath) matchedAbsolute
-
-        return $ Right $ sort matchedRelative
-      where
-        makeRelativeTo :: FilePath -> FilePath -> FilePath
-        makeRelativeTo base target =
-          let baseParts = splitDirectories (normalise base)
-              targetParts = splitDirectories (normalise target)
-              common = length $ takeWhile id $ zipWith (==) baseParts targetParts
-              ups = replicate (length baseParts - common) ".."
-              downs = drop common targetParts
-              rel = ups ++ downs
-          in if null rel then "." else joinPath rel
-
-    System.GetCwd -> return cwd
-  where
-    resolveAbsolutePath basePath path
-      | isAbsolute path = System.basicResolvePath path
-      | otherwise = System.basicResolvePath (basePath </> path)
-
--- | Pure interpreter for System.FileSystemWrite using in-memory map
+-- Reuse the dummy write interpreter for tests
 filesystemWriteDummy :: Member (Error String) r
-                     => DummyFS
+                     => InMemoryFS
                      -> Sem (System.FileSystemWrite : r) a
-                     -> Sem r (DummyFS, a)
+                     -> Sem r (InMemoryFS, a)
 filesystemWriteDummy fs prog = do
-  -- For now, just run without actual writes (could extend to return updated map)
-  result <- interpret (\case
-    System.WriteFile _p _d -> return $ Right ()
-    System.CreateDirectory _createParents _p -> return $ Right ()
-    System.Remove _recursive _p -> return $ Right ()
-    ) prog
+  result <- filesystemWriteInMemory fs prog
   return (fs, result)
 
 --------------------------------------------------------------------------------
@@ -120,26 +57,26 @@ instance HasProjectPath ProjectB where
 
 runProjectTest :: forall project a. HasProjectPath project
                => FilePath  -- CWD
-               -> DummyFS
+               -> InMemoryFS
                -> project
-               -> Sem '[FileSystemWrite project, FileSystemRead project, Project project, Fail, System.FileSystemRead, System.FileSystemWrite, Error String] a
+               -> Sem '[FileSystemWrite project, FileSystemRead project, FileSystem project, Fail, System.FileSystemRead, System.FileSystemWrite, Error String] a
                -> Either String a
 runProjectTest cwd fs proj prog =
   run
     . runError @String
     . fmap snd
     . filesystemWriteDummy fs
-    . filesystemReadDummy cwd fs
+    . filesystemReadInMemory cwd fs
     . failToError id
-    . projectFileSystemLocal proj
+    . fileSystemLocal proj
     $ prog
 
 runMultiProjectTest :: FilePath
-                    -> DummyFS
+                    -> InMemoryFS
                     -> ProjectA
                     -> ProjectB
-                    -> Sem '[FileSystemWrite ProjectA, FileSystemRead ProjectA, Project ProjectA,
-                             FileSystemWrite ProjectB, FileSystemRead ProjectB, Project ProjectB,
+                    -> Sem '[FileSystemWrite ProjectA, FileSystemRead ProjectA, FileSystem ProjectA,
+                             FileSystemWrite ProjectB, FileSystemRead ProjectB, FileSystem ProjectB,
                              Fail, System.FileSystemRead, System.FileSystemWrite, Error String] a
                     -> Either String a
 runMultiProjectTest cwd fs projA projB prog =
@@ -147,10 +84,10 @@ runMultiProjectTest cwd fs projA projB prog =
     . runError @String
     . fmap snd
     . filesystemWriteDummy fs
-    . filesystemReadDummy cwd fs
+    . filesystemReadInMemory cwd fs
     . failToError id
-    . projectFileSystemLocal projB
-    . projectFileSystemLocal projA
+    . fileSystemLocal projB
+    . fileSystemLocal projA
     $ prog
 
 
@@ -161,9 +98,9 @@ runMultiProjectTest cwd fs projA projB prog =
 spec :: Spec
 spec = do
   describe "Basic Project Operations" $ do
-    it "GetProject returns the project value" $ do
+    it "GetFileSystem returns the project value" $ do
       let proj = ProjectA "/test/project"
-          result = runProjectTest "/test" Map.empty proj $ getProject @ProjectA
+          result = runProjectTest "/test" Map.empty proj $ getFileSystem @ProjectA
 
       result `shouldBe` Right proj
 
@@ -241,7 +178,7 @@ spec = do
             , ("/project/.git", "git")
             ]
           result = runProjectTest "/project" fs proj $
-            filterProject @ProjectA hideDotfiles $
+            filterFileSystem @ProjectA hideDotfiles $
               glob @ProjectA "." "*"
 
       -- Should not include .hidden or .git
@@ -256,7 +193,7 @@ spec = do
             , ("/project/file.txt", "visible")
             ]
           result = runProjectTest "/project" fs proj $
-            filterProject @ProjectA hideGit $
+            filterFileSystem @ProjectA hideGit $
               fileExists @ProjectA ".git"
 
       result `shouldBe` Right False
@@ -268,7 +205,7 @@ spec = do
             , ("/project/src/Main.hs", "code")
             ]
           result = runProjectTest "/project" fs proj $
-            filterProject @ProjectA onlyClaude $ do
+            filterFileSystem @ProjectA onlyClaude $ do
               claude <- fileExists @ProjectA ".claude/agents/test.md"
               src <- fileExists @ProjectA "src/Main.hs"
               return (claude, src)
@@ -297,12 +234,12 @@ spec = do
               readFile @ProjectA ".git"
 
       result `shouldSatisfy` \case
-        Left err -> "filtered out" `isInfixOf` err
+        Left err -> "Access denied" `isInfixOf` err
         Right _ -> False
 
   describe "Capability Separation" $ do
-    it "Project effect allows structure exploration without reading" $ do
-      -- A function that only needs Project (not Read) can see files but not read them
+    it "FileSystem effect allows structure exploration without reading" $ do
+      -- A function that only needs FileSystem (not Read) can see files but not read them
       let proj = ProjectA "/project"
           fs = Map.fromList [("/project/config.yaml", "test: true")]
 
@@ -347,7 +284,7 @@ spec = do
 
           -- User files view: hide .git and .claude
           result = runMultiProjectTest "/project" fs userFiles claudeConfig $
-            filterProject @ProjectA (hideGit <> hideClaude) $ do
+            filterFileSystem @ProjectA (hideGit <> hideClaude) $ do
               gitExists <- fileExists @ProjectA ".git"
               claudeExists <- fileExists @ProjectA ".claude"
               srcExists <- fileExists @ProjectA "src/Main.hs"

@@ -20,7 +20,52 @@ import Prelude hiding (readFile)
 import Data.List (isInfixOf, isPrefixOf)
 
 import Runix.FileSystem.Effects
-import DummyFileSystemSpec (filesystemReadDummy, runFS, runFSWithFail, DummyFS)
+import qualified Runix.FileSystem.System.Effects as System
+import Runix.FileSystem.InMemory.Effects (InMemoryFS, filesystemInMemory)
+
+--------------------------------------------------------------------------------
+-- Test Project Type
+--------------------------------------------------------------------------------
+
+-- | Test project representing the entire filesystem (root at /)
+newtype SecurityTest = SecurityTest FilePath deriving (Show, Eq)
+
+instance HasProjectPath SecurityTest where
+  getProjectPath (SecurityTest p) = p
+
+--------------------------------------------------------------------------------
+-- Test Helpers
+--------------------------------------------------------------------------------
+
+-- | Run with security filter (equivalent to old limitSubpathRead)
+limitSubpathRead :: FilePath
+                 -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Fail, Error String] a
+                 -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Fail, Error String] a
+limitSubpathRead allowedPath prog =
+  filterFileSystem @SecurityTest (limitToSubpath allowedPath) (filterRead @SecurityTest (limitToSubpath allowedPath) prog)
+
+-- | Run filesystem test with Fail support
+runFSWithFail :: FilePath -> InMemoryFS
+              -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Fail, Error String] a
+              -> Either String a
+runFSWithFail cwd fs prog =
+  let proj = SecurityTest cwd  -- Use CWD as project root for consistent path resolution
+  in run
+    . runError @String
+    . failToError id
+    . filesystemInMemory cwd fs proj
+    $ prog
+
+-- | Run filesystem test without Fail (for glob that returns Either)
+runFS :: FilePath -> InMemoryFS
+      -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Error String] a
+      -> Either String a
+runFS cwd fs prog =
+  let proj = SecurityTest cwd  -- Use CWD as project root for consistent path resolution
+  in run
+    . runError @String
+    . filesystemInMemory cwd fs proj
+    $ prog
 
 --------------------------------------------------------------------------------
 -- Tests
@@ -29,10 +74,10 @@ import DummyFileSystemSpec (filesystemReadDummy, runFS, runFSWithFail, DummyFS)
 -- Test isPathAllowed logic directly
 testIsPathAllowed :: FilePath -> FilePath -> FilePath -> Bool
 testIsPathAllowed allowedPath cwd targetPath =
-  let normalizedAllowed = addTrailingPathSeparator $ basicResolvePath allowedPath
+  let normalizedAllowed = addTrailingPathSeparator $ System.basicResolvePath allowedPath
       absoluteTarget = if isAbsolute targetPath
-                      then basicResolvePath targetPath
-                      else basicResolvePath (cwd </> targetPath)
+                      then System.basicResolvePath targetPath
+                      else System.basicResolvePath (cwd </> targetPath)
       normalizedTarget = addTrailingPathSeparator absoluteTarget
   in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
 
@@ -91,7 +136,7 @@ spec = do
   describe "limitSubpathRead Security" $ do
     it "allows reading files within allowed path (absolute)" $ do
       let fs = Map.fromList [("/project/file.txt", "content")]
-          program = limitSubpathRead "/project" $ readFile "/project/file.txt"
+          program = limitSubpathRead "/project" $ readFile @SecurityTest "/project/file.txt"
           result = runFSWithFail "/project" fs program
 
       result `shouldBe` Right "content"
@@ -99,29 +144,29 @@ spec = do
     it "allows reading files within allowed path (relative)" $ do
       -- Relative path "subdir/file.txt" with CWD "/project" resolves to "/project/subdir/file.txt"
       let fs = Map.fromList [("/project/subdir/file.txt", "content")]
-          program = limitSubpathRead "/project" $ readFile "subdir/file.txt"
+          program = limitSubpathRead "/project" $ readFile @SecurityTest "subdir/file.txt"
           result = runFSWithFail "/project" fs program
 
       result `shouldBe` Right "content"
 
     it "blocks reading files outside allowed path (absolute)" $ do
       let fs = Map.fromList [("/etc/passwd", "secret")]
-          program = limitSubpathRead "/project" $ readFile "/etc/passwd"
+          program = limitSubpathRead "/project" $ readFile @SecurityTest "/etc/passwd"
           result = runFSWithFail "/project" fs program
 
       result `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> ("Access denied" `isInfixOf` err) || ("filtered out by" `isInfixOf` err)
         Right _ -> False
 
     it "blocks reading files outside allowed path (relative escape)" $ do
       -- "../../../etc/passwd" from "/project" normalizes to "/etc/passwd"
       let fs = Map.fromList [("/etc/passwd", "secret"), ("/project/dummy", "dummy")]
           --Test with security
-          resultWithSecurity = runFSWithFail "/project" fs $ limitSubpathRead "/project" $ readFile "/etc/passwd"
+          resultWithSecurity = runFSWithFail "/project" fs $ limitSubpathRead "/project" $ readFile @SecurityTest "/etc/passwd"
 
       -- Should be blocked with security when using absolute path
       resultWithSecurity `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> "Access denied" `isInfixOf` err
         Right _ -> False
 
     it "uses actual CWD to resolve relative paths, then checks against allowedPath" $ do
@@ -132,13 +177,13 @@ spec = do
       let fs = Map.fromList [("/actual/cwd/file.txt", "content"), ("/project/allowed.txt", "allowed")]
           -- Actual CWD is /actual/cwd, but we're restricting to /project
           -- "file.txt" resolves to /actual/cwd/file.txt which is outside /project
-          resultBlocked = runFSWithFail "/actual/cwd" fs $ limitSubpathRead "/project" $ readFile "file.txt"
+          resultBlocked = runFSWithFail "/actual/cwd" fs $ limitSubpathRead "/project" $ readFile @SecurityTest "file.txt"
           -- "/project/allowed.txt" is inside /project
-          resultAllowed = runFSWithFail "/actual/cwd" fs $ limitSubpathRead "/project" $ readFile "/project/allowed.txt"
+          resultAllowed = runFSWithFail "/actual/cwd" fs $ limitSubpathRead "/project" $ readFile @SecurityTest "/project/allowed.txt"
 
       -- "file.txt" resolves to /actual/cwd/file.txt which is outside /project -> BLOCKED
       resultBlocked `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> "Access denied" `isInfixOf` err
         Right _ -> False
 
       -- "/project/allowed.txt" is absolute and inside /project -> ALLOWED
@@ -153,11 +198,11 @@ spec = do
             , ("/project/subdir/file.txt", "subdir file")
             ]
           -- CWD is in a subdirectory, restricted to parent directory
-          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile "../../README.md"
+          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile @SecurityTest "../../README.md"
 
       -- "../../README.md" from /project/subdir resolves to /README.md which is outside /project -> BLOCKED
       result `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> ("Access denied" `isInfixOf` err) || ("filtered out by" `isInfixOf` err)
         Right _ -> False
 
     it "allows reading files with relative paths within allowed directory" $ do
@@ -167,7 +212,7 @@ spec = do
             , ("/project/file.txt", "parent content")
             ]
           -- CWD is /project/subdir, read relative path "file.txt"
-          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile "file.txt"
+          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile @SecurityTest "file.txt"
 
       result `shouldBe` Right "content"
 
@@ -178,7 +223,7 @@ spec = do
             , ("/project/file.txt", "parent content")
             ]
           -- CWD is /project/subdir, read "../file.txt" which resolves to /project/file.txt
-          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile "../file.txt"
+          result = runFSWithFail "/project/subdir" fs $ limitSubpathRead "/project" $ readFile @SecurityTest "../file.txt"
 
       result `shouldBe` Right "parent content"
 
@@ -190,10 +235,10 @@ spec = do
             ]
           -- CWD is /project/deep/nested/dir, try to read ../../../../etc/passwd
           result = runFSWithFail "/project/deep/nested/dir" fs $
-                   limitSubpathRead "/project" $ readFile "../../../../etc/passwd"
+                   limitSubpathRead "/project" $ readFile @SecurityTest "../../../../etc/passwd"
 
       result `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> ("Access denied" `isInfixOf` err) || ("filtered out by" `isInfixOf` err)
         Right _ -> False
 
   describe "Glob Operations" $ do
@@ -204,7 +249,7 @@ spec = do
             , ("/project/doc.md", "markdown")
             , ("/other/file3.txt", "content3")
             ]
-          result = runFSWithFail "/project" fs $ glob "/project" "*.txt"
+          result = runFSWithFail "/project" fs $ glob @SecurityTest "/project" "*.txt"
 
       -- Glob returns paths relative to base
       result `shouldBe` Right ["file1.txt", "file2.txt"]
@@ -216,7 +261,7 @@ spec = do
             , ("/project/subdir/doc.md", "markdown")
             ]
           -- "subdir" relative to CWD "/project" -> "/project/subdir"
-          result = runFSWithFail "/project" fs $ glob "subdir" "*.txt"
+          result = runFSWithFail "/project" fs $ glob @SecurityTest "subdir" "*.txt"
 
       result `shouldBe` Right ["file1.txt", "file2.txt"]
 
@@ -226,7 +271,7 @@ spec = do
             , ("/project/test_data.txt", "content2")
             , ("/project/prod_file.txt", "content3")
             ]
-          result = runFSWithFail "/project" fs $ glob "/project" "test_*.txt"
+          result = runFSWithFail "/project" fs $ glob @SecurityTest "/project" "test_*.txt"
 
       result `shouldBe` Right ["test_data.txt", "test_file.txt"]
 
@@ -235,7 +280,7 @@ spec = do
             [ ("/project/file1.txt", "content1")
             , ("/project/file2.txt", "content2")
             ]
-          result = runFSWithFail "/project" fs $ glob "/project" "*.md"
+          result = runFSWithFail "/project" fs $ glob @SecurityTest "/project" "*.md"
 
       result `shouldBe` Right []
 
@@ -249,7 +294,7 @@ spec = do
             ]
           -- CWD is /project/subdir, allowed path is /project/subdir
           -- glob(".", "../*") tries to list files in /project
-          program = limitSubpathRead "/project/subdir" $ glob "." "../*"
+          program = limitSubpathRead "/project/subdir" $ glob @SecurityTest "." "../*"
           result = runFSWithFail "/project/subdir" fs program
 
       -- Must be empty - /project/parent.txt is outside /project/subdir
@@ -261,7 +306,7 @@ spec = do
             , ("/project/file2.txt", "content2")
             , ("/project/doc.md", "markdown")
             ]
-          program = limitSubpathRead "/project" $ glob "/project" "*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "/project" "*.txt"
           result = runFSWithFail "/project" fs program
 
       result `shouldBe` Right ["file1.txt", "file2.txt"]
@@ -273,7 +318,7 @@ spec = do
             , ("/project/subdir/doc.md", "markdown")
             ]
           -- "subdir" relative to CWD "/project" resolves to "/project/subdir"
-          program = limitSubpathRead "/project" $ glob "subdir" "*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "subdir" "*.txt"
           result = runFSWithFail "/project" fs program
 
       result `shouldBe` Right ["file1.txt", "file2.txt"]
@@ -283,11 +328,11 @@ spec = do
             [ ("/etc/file1.conf", "config1")
             , ("/etc/file2.conf", "config2")
             ]
-          program = limitSubpathRead "/project" $ glob "/etc" "*.conf"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "/etc" "*.conf"
           result = runFSWithFail "/project" fs program
 
       result `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> ("Access denied" `isInfixOf` err) || ("filtered out by" `isInfixOf` err)
         Right _ -> False
 
     it "blocks glob with base that escapes via relative path" $ do
@@ -298,11 +343,11 @@ spec = do
             , ("/project/README.md", "project readme")
             , ("/project/subdir/file.txt", "content")
             ]
-          program = limitSubpathRead "/project" $ glob "../.." "*.md"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "../.." "*.md"
           result = runFSWithFail "/project/subdir" fs program
 
       result `shouldSatisfy` \case
-        Left err -> "not allowed" `isInfixOf` err
+        Left err -> ("Access denied" `isInfixOf` err) || ("filtered out by" `isInfixOf` err)
         Right _ -> False
 
     it "allows glob in subdirectory with relative base" $ do
@@ -315,7 +360,7 @@ spec = do
             , ("/project/other.txt", "other")
             ]
           -- "." relative to CWD "/project/subdir" -> "/project/subdir"
-          program = limitSubpathRead "/project" $ glob "." "*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "." "*.txt"
           result = runFSWithFail "/project/subdir" fs program
 
       result `shouldBe` Right ["file1.txt", "file2.txt"]
@@ -328,7 +373,7 @@ spec = do
             , ("/project/deep/nested/dir/file2.txt", "content2")
             , ("/project/deep/nested/dir/doc.md", "markdown")
             ]
-          program = limitSubpathRead "/project" $ glob "." "*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "." "*.txt"
           result = runFSWithFail "/project/deep/nested/dir" fs program
 
       result `shouldBe` Right ["file1.txt", "file2.txt"]
@@ -341,7 +386,7 @@ spec = do
             , ("/project/file2.txt", "content2")
             , ("/project/subdir/nested.txt", "nested")
             ]
-          program = limitSubpathRead "/project" $ glob ".." "*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest ".." "*.txt"
           result = runFSWithFail "/project/subdir" fs program
 
       result `shouldBe` Right ["file1.txt", "file2.txt"]
@@ -358,7 +403,7 @@ spec = do
           -- glob(".", "../*.txt") should match /project/file.txt
           -- Since base "." = /project/subdir is within /project, glob executes
           -- But result /project/file.txt should be allowed (it's within /project)
-          program = limitSubpathRead "/project" $ glob "." "../*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "." "../*.txt"
           result = runFSWithFail "/project/subdir" fs program
 
       -- /project/file.txt is within /project so it should be allowed
@@ -372,7 +417,7 @@ spec = do
             , ("/file.txt", "root file")
             ]
           -- glob WITHOUT limitSubpathRead should return ../../file.txt
-          programWithoutFilter = glob "." "../../*.txt"
+          programWithoutFilter = glob @SecurityTest "." "../../*.txt"
           resultWithoutFilter = runFSWithFail "/project/subdir" fs programWithoutFilter
 
       -- Should match and return the relative path ../../file.txt
@@ -386,7 +431,7 @@ spec = do
             ]
           -- CWD is /project/subdir, allowed path is /project
           -- glob(".", "../../*.txt") would match /file.txt which is OUTSIDE /project
-          program = limitSubpathRead "/project" $ glob "." "../../*.txt"
+          program = limitSubpathRead "/project" $ glob @SecurityTest "." "../../*.txt"
           result = runFSWithFail "/project/subdir" fs program
 
       -- /file.txt is outside /project so it must be filtered out
@@ -420,12 +465,11 @@ spec = do
             ]
           -- Base is "/project" which is allowed, but pattern tries to escape
           -- The glob operation itself might return /file.txt, but it should be filtered
-          program = limitSubpathRead "/project" $ send (Glob "/project" "../*.txt")
-          result = runFS "/project" fs program
+          program = limitSubpathRead "/project" $ glob @SecurityTest "/project" "../*.txt"
+          result = runFSWithFail "/project" fs program
 
       -- Even if glob returns files outside, they should be filtered
       -- In this case, "/file.txt" should be filtered out
       case result of
-        Right (Right files) -> files `shouldNotContain` ["/file.txt"]
-        Right (Left err) -> expectationFailure $ "Glob failed: " ++ err
-        Left _ -> expectationFailure "Error effect triggered"
+        Right files -> files `shouldNotContain` ["/file.txt"]
+        Left err -> expectationFailure $ "Glob failed: " ++ err
