@@ -473,3 +473,192 @@ spec = do
       case result of
         Right files -> files `shouldNotContain` ["/file.txt"]
         Left err -> expectationFailure $ "Glob failed: " ++ err
+
+  describe "Filter Composition" $ do
+    it "hideGit filter blocks .git directory" $ do
+      let filter = hideGit
+          gitPath = "/project/.git/config"
+          normalPath = "/project/src/Main.hs"
+
+      -- .git directory should be blocked
+      shouldInclude filter gitPath `shouldBe` False
+      -- Normal files should be allowed
+      shouldInclude filter normalPath `shouldBe` True
+
+    it "hideGit filter blocks paths with .git component anywhere" $ do
+      let filter = hideGit
+          gitSubPath = "/project/.git/objects/abc123"
+          nestedGit = "/project/subdir/.git/config"
+
+      shouldInclude filter gitSubPath `shouldBe` False
+      shouldInclude filter nestedGit `shouldBe` False
+
+    it "hideClaude filter blocks .claude directory" $ do
+      let filter = hideClaude
+          claudePath = "/project/.claude/commands/test.sh"
+          normalPath = "/project/src/Main.hs"
+
+      -- .claude directory should be blocked
+      shouldInclude filter claudePath `shouldBe` False
+      -- Normal files should be allowed
+      shouldInclude filter normalPath `shouldBe` True
+
+    it "limitToSubpath <> hideGit combines filters with AND logic" $ do
+      let combinedFilter = limitToSubpath "/project" <> hideGit
+          -- Path inside project AND not in .git -> should be allowed
+          allowedPath = "/project/src/Main.hs"
+          -- Path inside project BUT in .git -> should be blocked
+          gitPath = "/project/.git/config"
+          -- Path outside project AND not in .git -> should be blocked
+          outsidePath = "/etc/passwd"
+
+      shouldInclude combinedFilter allowedPath `shouldBe` True
+      shouldInclude combinedFilter gitPath `shouldBe` False
+      shouldInclude combinedFilter outsidePath `shouldBe` False
+
+    it "limitToSubpath <> hideGit <> hideClaude combines three filters" $ do
+      let tripleFilter = limitToSubpath "/project" <> hideGit <> hideClaude
+          normalPath = "/project/src/Main.hs"
+          gitPath = "/project/.git/config"
+          claudePath = "/project/.claude/commands/test.sh"
+          outsidePath = "/etc/passwd"
+
+      -- Only normal path inside project should be allowed
+      shouldInclude tripleFilter normalPath `shouldBe` True
+      shouldInclude tripleFilter gitPath `shouldBe` False
+      shouldInclude tripleFilter claudePath `shouldBe` False
+      shouldInclude tripleFilter outsidePath `shouldBe` False
+
+    it "filterFileSystem with combined filters blocks .git files" $ do
+      let fs = Map.fromList
+            [ ("/project/.git/config", "git config")
+            , ("/project/src/Main.hs", "main source")
+            , ("/project/README.md", "readme")
+            ]
+          combinedFilter = limitToSubpath "/project" <> hideGit
+          program = filterFileSystem @SecurityTest combinedFilter $
+                    listFiles @SecurityTest "/project"
+          result = runFSWithFail "/project" fs program
+
+      case result of
+        Right files -> do
+          -- Should include normal files
+          files `shouldSatisfy` ("src" `elem`)
+          files `shouldSatisfy` ("README.md" `elem`)
+          -- Should NOT include .git directory
+          files `shouldSatisfy` (".git" `notElem`)
+        Left err -> expectationFailure $ "List files failed: " ++ err
+
+    it "filterRead with combined filters blocks reading .git files" $ do
+      let fs = Map.fromList
+            [ ("/project/.git/config", "git config")
+            , ("/project/src/Main.hs", "main source")
+            ]
+          combinedFilter = limitToSubpath "/project" <> hideGit
+          -- Try to read a .git file
+          program = filterFileSystem @SecurityTest combinedFilter $
+                    filterRead @SecurityTest combinedFilter $
+                    readFile @SecurityTest "/project/.git/config"
+          result = runFSWithFail "/project" fs program
+
+      result `shouldSatisfy` \case
+        Left err -> "Access denied" `isInfixOf` err
+        Right _ -> False
+
+    it "filterRead with combined filters allows reading non-.git files" $ do
+      let fs = Map.fromList
+            [ ("/project/.git/config", "git config")
+            , ("/project/src/Main.hs", "main source")
+            ]
+          combinedFilter = limitToSubpath "/project" <> hideGit
+          -- Try to read a normal file
+          program = filterFileSystem @SecurityTest combinedFilter $
+                    filterRead @SecurityTest combinedFilter $
+                    readFile @SecurityTest "/project/src/Main.hs"
+          result = runFSWithFail "/project" fs program
+
+      result `shouldBe` Right "main source"
+
+  describe "onlyClaude Filter" $ do
+    it "onlyClaude filter allows .claude directory paths" $ do
+      let filter = onlyClaude
+          claudePath1 = "/project/.claude/commands/test.sh"
+          claudePath2 = "/project/.claude/config.json"
+          nestedClaude = "/project/src/.claude/file.txt"
+
+      shouldInclude filter claudePath1 `shouldBe` True
+      shouldInclude filter claudePath2 `shouldBe` True
+      shouldInclude filter nestedClaude `shouldBe` True
+
+    it "onlyClaude filter allows CLAUDE.md at any path" $ do
+      let filter = onlyClaude
+          rootClaude = "/project/CLAUDE.md"
+          nestedClaude = "/project/subdir/CLAUDE.md"
+
+      -- These should be allowed
+      shouldInclude filter rootClaude `shouldBe` True
+      shouldInclude filter nestedClaude `shouldBe` True
+
+    it "onlyClaude filter blocks non-.claude files" $ do
+      let filter = onlyClaude
+          normalFile = "/project/src/Main.hs"
+          readme = "/project/README.md"
+          gitFile = "/project/.git/config"
+
+      shouldInclude filter normalFile `shouldBe` False
+      shouldInclude filter readme `shouldBe` False
+      shouldInclude filter gitFile `shouldBe` False
+
+    it "onlyClaude allows reading .claude files" $ do
+      let fs = Map.fromList
+            [ ("/project/.claude/commands/test.sh", "test command")
+            , ("/project/src/Main.hs", "main source")
+            ]
+          program = filterFileSystem @SecurityTest onlyClaude $
+                    filterRead @SecurityTest onlyClaude $
+                    readFile @SecurityTest "/project/.claude/commands/test.sh"
+          result = runFSWithFail "/project" fs program
+
+      result `shouldBe` Right "test command"
+
+    it "onlyClaude allows reading CLAUDE.md" $ do
+      let fs = Map.fromList
+            [ ("/project/CLAUDE.md", "project instructions")
+            , ("/project/src/Main.hs", "main source")
+            ]
+          program = filterFileSystem @SecurityTest onlyClaude $
+                    filterRead @SecurityTest onlyClaude $
+                    readFile @SecurityTest "/project/CLAUDE.md"
+          result = runFSWithFail "/project" fs program
+
+      result `shouldBe` Right "project instructions"
+
+    it "onlyClaude blocks reading non-.claude files" $ do
+      let fs = Map.fromList
+            [ ("/project/src/Main.hs", "main source")
+            , ("/project/.claude/commands/test.sh", "test command")
+            ]
+          program = filterFileSystem @SecurityTest onlyClaude $
+                    filterRead @SecurityTest onlyClaude $
+                    readFile @SecurityTest "/project/src/Main.hs"
+          result = runFSWithFail "/project" fs program
+
+      result `shouldSatisfy` \case
+        Left err -> "Access denied" `isInfixOf` err
+        Right _ -> False
+
+    it "limitToSubpath <> onlyClaude combines correctly" $ do
+      let combinedFilter = limitToSubpath "/project" <> onlyClaude
+          -- Inside project AND in .claude -> allowed
+          allowedPath = "/project/.claude/commands/test.sh"
+          -- Inside project AND CLAUDE.md -> allowed
+          claudeMd = "/project/CLAUDE.md"
+          -- Inside project but NOT in .claude -> blocked
+          blockedPath = "/project/src/Main.hs"
+          -- Outside project (even if .claude) -> blocked
+          outsidePath = "/other/.claude/file.txt"
+
+      shouldInclude combinedFilter allowedPath `shouldBe` True
+      shouldInclude combinedFilter claudeMd `shouldBe` True
+      shouldInclude combinedFilter blockedPath `shouldBe` False
+      shouldInclude combinedFilter outsidePath `shouldBe` False

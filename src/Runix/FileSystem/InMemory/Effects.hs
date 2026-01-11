@@ -25,7 +25,7 @@ import Data.ByteString (ByteString)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import System.FilePath
-import Data.List (sort)
+import Data.List (sort, isPrefixOf)
 import qualified System.FilePath.Glob as Glob
 import Runix.FileSystem.System.Effects
 import qualified Runix.FileSystem.Effects as Param
@@ -45,9 +45,23 @@ filesystemReadInMemory cwd fs = interpret $ \case
         Just content -> Right content
         Nothing -> Left $ "File not found: " ++ p
 
-    ListFiles p -> return $ case Map.lookup (resolveAbsolutePath cwd p) fs of
-        Just _ -> Left $ "Not a directory: " ++ p
-        Nothing -> Left $ "Directory not found: " ++ p
+    ListFiles p -> do
+        let dirPath = addTrailingPathSeparator $ resolveAbsolutePath cwd p
+            allPaths = Map.keys fs
+            -- Get immediate children (files and directories)
+            children = [ firstComponent
+                       | path <- allPaths
+                       , dirPath `isPrefixOf` path
+                       , let remainder = drop (length dirPath) path
+                       , not (null remainder)
+                       , let firstComponent = takeWhile (/= '/') remainder
+                       , not (null firstComponent)
+                       ]
+            uniqueChildren = sort $ nub' children
+        return $ Right uniqueChildren
+      where
+        nub' :: Ord a => [a] -> [a]
+        nub' = Map.keys . Map.fromList . map (\x -> (x, ()))
 
     FileExists p -> return $ Right $ Map.member (resolveAbsolutePath cwd p) fs
 
@@ -139,7 +153,21 @@ filesystemInMemory cwd fs proj =
     interpretFileSystem = interpret $ \case
       Param.GetFileSystem -> return proj
       Param.GetCwd -> return $ Right cwd
-      Param.ListFiles p -> return $ Left "ListFiles not implemented in InMemory"
+      Param.ListFiles p -> do
+        let dirPath = addTrailingPathSeparator $ resolvePath p
+            allPaths = Map.keys fs
+            -- Get immediate children (files and directories)
+            children = [ firstComponent
+                       | path <- allPaths
+                       , dirPath `isPrefixOf` path
+                       , let remainder = drop (length dirPath) path
+                       , not (null remainder)
+                       , let firstComponent = takeWhile (/= '/') remainder
+                       , not (null firstComponent)
+                       ]
+            -- Remove duplicates using Map
+            uniqueChildren = sort $ Map.keys $ Map.fromList $ map (\x -> (x, ())) children
+        return $ Right uniqueChildren
       Param.FileExists p -> return $ Right $ Map.member (resolvePath p) fs
       Param.IsDirectory _p -> return $ Right False
       Param.Glob base pat -> do

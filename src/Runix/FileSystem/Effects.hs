@@ -413,14 +413,18 @@ hideDotfiles = PathFilter
 -- | Hide .git directory
 hideGit :: PathFilter
 hideGit = PathFilter
-  { shouldInclude = \p -> ".git" `notElem` splitPath p
+  { shouldInclude = \p ->
+      let components = splitPath p
+      in not (any (\c -> c == ".git" || c == ".git/") components)
   , filterName = ".git directory is hidden"
   }
 
 -- | Hide .claude directory
 hideClaude :: PathFilter
 hideClaude = PathFilter
-  { shouldInclude = \p -> ".claude" `notElem` splitPath p
+  { shouldInclude = \p ->
+      let components = splitPath p
+      in not (any (\c -> c == ".claude" || c == ".claude/") components)
   , filterName = ".claude directory is hidden"
   }
 
@@ -429,7 +433,8 @@ onlyClaude :: PathFilter
 onlyClaude = PathFilter
   { shouldInclude = \p ->
       let components = splitPath p
-      in any (\c -> c == ".claude" || c == ".claude/") components || p == "CLAUDE.md"
+          fileName = takeFileName p
+      in any (\c -> c == ".claude" || c == ".claude/") components || fileName == "CLAUDE.md"
   , filterName = "only .claude directory and CLAUDE.md are accessible"
   }
 
