@@ -62,6 +62,9 @@ isDirectory = Parameterized.isDirectory
 glob :: Members [FileSystem, Fail] r => FilePath -> String -> Sem r [FilePath]
 glob = Parameterized.glob
 
+getCwd :: Members [FileSystem, Fail] r => Sem r FilePath
+getCwd = Parameterized.getCwd
+
 -- File content operations
 readFile :: Members [FileSystemRead, Fail] r => FilePath -> Sem r ByteString
 readFile = Parameterized.readFile

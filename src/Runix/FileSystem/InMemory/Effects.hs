@@ -129,11 +129,11 @@ filesystemInMemory :: forall project r a.
 filesystemInMemory cwd fs proj =
   interpretFileSystem . interpretFileSystemRead . interpretFileSystemWrite
   where
-    -- Resolve a path to an absolute path using CWD
+    -- Resolve a path to an absolute path for filesystem lookups
     resolvePath :: FilePath -> FilePath
     resolvePath p
-      | isAbsolute p = basicResolvePath p  -- Already absolute
-      | otherwise = basicResolvePath (cwd </> p)  -- Relative to CWD
+      | isAbsolute p = basicResolvePath p
+      | otherwise = basicResolvePath (cwd </> p)
 
     interpretFileSystem :: Sem (Param.FileSystem project : r') x -> Sem r' x
     interpretFileSystem = interpret $ \case

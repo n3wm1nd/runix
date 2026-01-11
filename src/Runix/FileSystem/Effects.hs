@@ -136,7 +136,103 @@ instance HasProjectPath FilePath where
 -- Local Filesystem Interpreter
 --------------------------------------------------------------------------------
 
--- | Interpret filesystem effects for a local directory
+-- | Wrap System filesystem as a parameterized filesystem (no chroot)
+-- Just passes through to System.* operations
+fileSystemFromSystem :: forall project r a.
+                        ( HasProjectPath project
+                        , Members [System.FileSystemRead, System.FileSystemWrite] r
+                        )
+                     => project
+                     -> Sem (FileSystemWrite project : FileSystemRead project : FileSystem project : r) a
+                     -> Sem r a
+fileSystemFromSystem project action =
+  interpretFileSystem project
+    . interpretFileSystemRead
+    . interpretFileSystemWrite
+    $ action
+  where
+    interpretFileSystem :: Member System.FileSystemRead r'
+                        => project -> Sem (FileSystem project : r') a' -> Sem r' a'
+    interpretFileSystem proj = interpret $ \case
+      GetFileSystem -> return proj
+      GetCwd -> fmap Right (send System.GetCwd)
+      ListFiles p -> send (System.ListFiles p)
+      FileExists p -> send (System.FileExists p)
+      IsDirectory p -> send (System.IsDirectory p)
+      Glob base pat -> send (System.Glob base pat)
+
+    interpretFileSystemRead :: Member System.FileSystemRead r'
+                            => Sem (FileSystemRead project : r') a' -> Sem r' a'
+    interpretFileSystemRead = interpret $ \case
+      ReadFile p -> send (System.ReadFile p)
+
+    interpretFileSystemWrite :: Member System.FileSystemWrite r'
+                             => Sem (FileSystemWrite project : r') a' -> Sem r' a'
+    interpretFileSystemWrite = interpret $ \case
+      WriteFile p d -> send (System.WriteFile p d)
+      CreateDirectory createParents p -> send (System.CreateDirectory createParents p)
+      Remove recursive p -> send (System.Remove recursive p)
+
+-- | Chroot a filesystem to a subdirectory
+-- Translates absolute paths and GetCwd to chroot coordinates
+chrootFileSystem :: forall project r a.
+                    ( HasProjectPath project
+                    , Members [FileSystemRead project, FileSystemWrite project, FileSystem project] r
+                    )
+                 => Sem r a
+                 -> Sem r a
+chrootFileSystem action =
+  interceptFileSystem . interceptFileSystemRead . interceptFileSystemWrite $ action
+  where
+    -- Prepend root only for absolute paths (strip leading / first)
+    chrootPath :: FilePath -> FilePath -> FilePath
+    chrootPath root p = if isAbsolute p then root </> dropWhile (== '/') p else p
+
+    interceptFileSystem :: Member (FileSystem project) r' => Sem r' a' -> Sem r' a'
+    interceptFileSystem = intercept $ \case
+      GetFileSystem -> send (GetFileSystem @project)
+      GetCwd -> do
+        proj <- send (GetFileSystem @project)
+        cwdResult <- send (GetCwd @project)
+        case cwdResult of
+          Left err -> return $ Left err
+          Right systemCwd -> do
+            let root = getProjectPath proj
+                relative = makeRelative root systemCwd
+                chrootCwd = if relative == "." then "/" else "/" </> relative
+            return $ Right chrootCwd
+      ListFiles p -> do
+        proj <- send (GetFileSystem @project)
+        send (ListFiles @project (chrootPath (getProjectPath proj) p))
+      FileExists p -> do
+        proj <- send (GetFileSystem @project)
+        send (FileExists @project (chrootPath (getProjectPath proj) p))
+      IsDirectory p -> do
+        proj <- send (GetFileSystem @project)
+        send (IsDirectory @project (chrootPath (getProjectPath proj) p))
+      Glob base pat -> do
+        proj <- send (GetFileSystem @project)
+        send (Glob @project (chrootPath (getProjectPath proj) base) pat)
+
+    interceptFileSystemRead :: Members [FileSystemRead project, FileSystem project] r' => Sem r' a' -> Sem r' a'
+    interceptFileSystemRead = intercept $ \case
+      ReadFile p -> do
+        proj <- send (GetFileSystem @project)
+        send (ReadFile @project (chrootPath (getProjectPath proj) p))
+
+    interceptFileSystemWrite :: Members [FileSystemWrite project, FileSystem project] r' => Sem r' a' -> Sem r' a'
+    interceptFileSystemWrite = intercept $ \case
+      WriteFile p d -> do
+        proj <- send (GetFileSystem @project)
+        send (WriteFile @project (chrootPath (getProjectPath proj) p) d)
+      CreateDirectory createParents p -> do
+        proj <- send (GetFileSystem @project)
+        send (CreateDirectory @project createParents (chrootPath (getProjectPath proj) p))
+      Remove recursive p -> do
+        proj <- send (GetFileSystem @project)
+        send (Remove @project recursive (chrootPath (getProjectPath proj) p))
+
+-- | Interpret filesystem effects for a local directory (with chroot)
 -- All paths are relative to the project root
 fileSystemLocal :: forall project r a.
                    ( HasProjectPath project
@@ -146,33 +242,7 @@ fileSystemLocal :: forall project r a.
                  -> Sem (FileSystemWrite project : FileSystemRead project : FileSystem project : r) a
                  -> Sem r a
 fileSystemLocal project action =
-  let rootPath = getProjectPath project
-  in interpretFileSystem project
-     . interpretFileSystemRead rootPath
-     . interpretFileSystemWrite rootPath
-     $ action
-  where
-    interpretFileSystem :: Member System.FileSystemRead r'
-                        => project -> Sem (FileSystem project : r') a' -> Sem r' a'
-    interpretFileSystem proj = interpret $ \case
-      GetFileSystem -> return proj
-      GetCwd -> fmap Right (send System.GetCwd)
-      ListFiles p -> send (System.ListFiles (getProjectPath proj </> p))
-      FileExists p -> send (System.FileExists (getProjectPath proj </> p))
-      IsDirectory p -> send (System.IsDirectory (getProjectPath proj </> p))
-      Glob base pat -> send (System.Glob (getProjectPath proj </> base) pat)
-
-    interpretFileSystemRead :: Member System.FileSystemRead r'
-                            => FilePath -> Sem (FileSystemRead project : r') a' -> Sem r' a'
-    interpretFileSystemRead root = interpret $ \case
-      ReadFile p -> send (System.ReadFile (root </> p))
-
-    interpretFileSystemWrite :: Member System.FileSystemWrite r'
-                             => FilePath -> Sem (FileSystemWrite project : r') a' -> Sem r' a'
-    interpretFileSystemWrite root = interpret $ \case
-      WriteFile p d -> send (System.WriteFile (root </> p) d)
-      CreateDirectory createParents p -> send (System.CreateDirectory createParents (root </> p))
-      Remove recursive p -> send (System.Remove recursive (root </> p))
+  fileSystemFromSystem project (chrootFileSystem action)
 
 --------------------------------------------------------------------------------
 -- Filters

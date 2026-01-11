@@ -145,9 +145,9 @@ spec = do
             [ ("/project-a/a.txt", "from A")
             , ("/project-b/b.txt", "from B")
             ]
-          result = runMultiProjectTest "/test" fs projA projB $ do
-            contentA <- readFile @ProjectA "a.txt"
-            contentB <- readFile @ProjectB "b.txt"
+          result = runMultiProjectTest "/" fs projA projB $ do
+            contentA <- readFile @ProjectA "/a.txt"
+            contentB <- readFile @ProjectB "/b.txt"
             return (contentA, contentB)
 
       result `shouldBe` Right ("from A", "from B")
@@ -160,11 +160,11 @@ spec = do
             , ("/project-b/fileB.txt", "from B")
             ]
           -- Each project can only access files relative to its own root
-          result = runMultiProjectTest "/test" fs projA projB $ do
-            -- ProjectA can access its own files
-            aFile <- readFile @ProjectA "fileA.txt"
-            -- ProjectB can access its own files
-            bFile <- readFile @ProjectB "fileB.txt"
+          result = runMultiProjectTest "/" fs projA projB $ do
+            -- ProjectA can access its own files (absolute in chroot)
+            aFile <- readFile @ProjectA "/fileA.txt"
+            -- ProjectB can access its own files (absolute in chroot)
+            bFile <- readFile @ProjectB "/fileB.txt"
             return (aFile, bFile)
 
       result `shouldBe` Right ("from A", "from B")
