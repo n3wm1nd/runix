@@ -51,29 +51,29 @@ type FileWatcher = Parameterized.FileWatcher Default
 
 -- Filesystem structure operations
 listFiles :: Members [FileSystem, Fail] r => FilePath -> Sem r [FilePath]
-listFiles p = send (Parameterized.ListFiles @Default p) >>= either fail return
+listFiles = Parameterized.listFiles
 
 fileExists :: Members [FileSystem, Fail] r => FilePath -> Sem r Bool
-fileExists p = send (Parameterized.FileExists @Default p) >>= either fail return
+fileExists = Parameterized.fileExists
 
 isDirectory :: Members [FileSystem, Fail] r => FilePath -> Sem r Bool
-isDirectory p = send (Parameterized.IsDirectory @Default p) >>= either fail return
+isDirectory = Parameterized.isDirectory
 
 glob :: Members [FileSystem, Fail] r => FilePath -> String -> Sem r [FilePath]
-glob base pat = send (Parameterized.Glob @Default base pat) >>= either fail return
+glob = Parameterized.glob
 
 -- File content operations
 readFile :: Members [FileSystemRead, Fail] r => FilePath -> Sem r ByteString
-readFile p = send (Parameterized.ReadFile @Default p) >>= either fail return
+readFile = Parameterized.readFile
 
 writeFile :: Members [FileSystemWrite, Fail] r => FilePath -> ByteString -> Sem r ()
-writeFile p d = send (Parameterized.WriteFile @Default p d) >>= either fail return
+writeFile = Parameterized.writeFile
 
 createDirectory :: Members [FileSystemWrite, Fail] r => Bool -> FilePath -> Sem r ()
-createDirectory createParents p = send (Parameterized.CreateDirectory @Default createParents p) >>= either fail return
+createDirectory = Parameterized.createDirectory
 
 remove :: Members [FileSystemWrite, Fail] r => Bool -> FilePath -> Sem r ()
-remove recursive p = send (Parameterized.Remove @Default recursive p) >>= either fail return
+remove = Parameterized.remove
 
 -- | Interpreter: translates Simple (Default-based) effects to any parameterized filesystem
 -- This allows code written against the simple interface to work with any actual filesystem
