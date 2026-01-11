@@ -41,6 +41,7 @@ data Grep (m :: Type -> Type) a where
 
 makeSem ''Grep
 
+-- TODO: this is using the filesystem.system effects, it should work with any filesystem that translates to system paths
 -- | Grep interpreter using ripgrep
 grepIO :: HasCallStack => Members [Cmd, Logging, FileSystemRead, Fail] r => Sem (Grep : r) a -> Sem r a
 grepIO = interpret $ \case
