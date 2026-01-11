@@ -75,6 +75,22 @@ createDirectory = Parameterized.createDirectory
 remove :: Members [FileSystemWrite, Fail] r => Bool -> FilePath -> Sem r ()
 remove = Parameterized.remove
 
+-- File watching operations
+watchFile :: Member FileWatcher r => FilePath -> Sem r ()
+watchFile = Parameterized.watchFile
+
+getChangedFiles :: Member FileWatcher r => Sem r [(FilePath, ByteString, ByteString)]
+getChangedFiles = Parameterized.getChangedFiles
+
+clearWatched :: Member FileWatcher r => Sem r ()
+clearWatched = Parameterized.clearWatched
+
+unwatchFile :: Member FileWatcher r => FilePath -> Sem r ()
+unwatchFile = Parameterized.unwatchFile
+
+getWatchedFiles :: Member FileWatcher r => Sem r [FilePath]
+getWatchedFiles = Parameterized.getWatchedFiles
+
 -- | Interpreter: translates Simple (Default-based) effects to any parameterized filesystem
 -- This allows code written against the simple interface to work with any actual filesystem
 withDefaultFileSystem :: forall p r x. Member (Parameterized.FileSystem p) r => Sem (FileSystem : r) x -> Sem r x
@@ -101,7 +117,13 @@ withDefaultFileSystemWrite = interpret $ \case
 filesystemIO :: (Member (Embed IO) r,  Member Logging r) => 
   Sem (FileSystemWrite : FileSystemRead : FileSystem :r)   a -> Sem r a
 filesystemIO =
-  System.filesystemReadIO . System.filesystemWriteIO . Parameterized.fileSystemLocal "/" 
+  System.filesystemReadIO . System.filesystemWriteIO . Parameterized.fileSystemLocal "/"
   . raise3Under . raise3Under -- knock out system filesystem effects
-  . withDefaultFileSystem . withDefaultFileSystemRead . withDefaultFileSystemWrite 
+  . withDefaultFileSystem . withDefaultFileSystemRead . withDefaultFileSystemWrite
   . raise3Under . raise3Under . raise3Under -- knock out parametrized (non-default) effects
+
+-- | Generic content-based interpreter for simple FileWatcher effect
+-- Uses FileSystemRead to detect changes by comparing file content
+-- This is the canonical way to watch files with the Default/Simple filesystem
+fileWatcher :: Members '[FileSystemRead, Fail] r => Sem (FileWatcher : r) a -> Sem r a
+fileWatcher = Parameterized.fileWatcherGeneric

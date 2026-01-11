@@ -394,6 +394,7 @@ loggingFileSystem :: forall project r a.
                   -> Sem r a
 loggingFileSystem prefix = intercept $ \case
   GetFileSystem -> send (GetFileSystem @project)
+  GetCwd -> send (GetCwd @project)
   ListFiles p -> do
     info $ fromString $ prefix <> "listing files: " <> p
     send (ListFiles @project p)
@@ -490,12 +491,69 @@ interceptFileAccessWrite = intercept @(FileSystemWrite project) $ \case
     Remove recursive path -> send (Remove @project recursive path)
 
 -- | State for the FileWatcher interpreter
+-- | State for content-based file watching (no mtimes, just hashes)
+data WatcherStateGeneric = WatcherStateGeneric
+    { watchedFilesGeneric :: !(Map FilePath ByteString)  -- FilePath -> LastContentHash
+    }
+
+emptyWatcherStateGeneric :: WatcherStateGeneric
+emptyWatcherStateGeneric = WatcherStateGeneric mempty
+
+-- | State for mtime-based file watching
 data WatcherState = WatcherState
     { watchedFiles :: !(Map FilePath (UTCTime, ByteString))  -- FilePath -> (ModTime, LastContent)
     }
 
 emptyWatcherState :: WatcherState
 emptyWatcherState = WatcherState mempty
+
+-- | Generic interpreter for FileWatcher effect
+-- Uses FileSystemRead to read files and compares content hashes
+-- Works with any filesystem backend, not just System/IO
+-- NOTE: This re-reads all watched files on each GetChangedFiles call
+fileWatcherGeneric :: forall project r a.
+                      Members '[FileSystemRead project, Fail] r
+                   => Sem (FileWatcher project : r) a -> Sem r a
+fileWatcherGeneric action = fmap snd $ runState emptyWatcherStateGeneric $ reinterpret (\case
+    WatchFile path -> do
+        -- Try to read the file content
+        contentResult <- raise $ runFail $ readFile @project path
+        case contentResult of
+            Left _ -> return ()  -- Silently ignore files that can't be read
+            Right content -> do
+                WatcherStateGeneric watched <- get @WatcherStateGeneric
+                put $ WatcherStateGeneric $ Map.insert path content watched
+
+    GetChangedFiles -> do
+        WatcherStateGeneric watched <- get @WatcherStateGeneric
+        -- Re-read each watched file and compare content
+        changedFiles <- fmap catMaybes $ forM (Map.toList watched) $ \(path, oldContent) -> do
+            contentResult <- raise $ runFail $ readFile @project path
+            case contentResult of
+                Left _ -> return Nothing  -- File no longer exists or can't be accessed
+                Right newContent
+                    | newContent /= oldContent -> return $ Just (path, oldContent, newContent)
+                    | otherwise -> return Nothing
+
+        -- Update state with new content for changed files
+        let updatedContent = Map.fromList [(path, newContent) | (path, _old, newContent) <- changedFiles]
+        WatcherStateGeneric currentWatched <- get @WatcherStateGeneric
+        let finalWatched = Map.union updatedContent currentWatched
+        put $ WatcherStateGeneric finalWatched
+
+        return changedFiles
+
+    ClearWatched -> do
+        put emptyWatcherStateGeneric
+
+    UnwatchFile path -> do
+        WatcherStateGeneric watched <- get @WatcherStateGeneric
+        put $ WatcherStateGeneric $ Map.delete path watched
+
+    GetWatchedFiles -> do
+        WatcherStateGeneric watched <- get @WatcherStateGeneric
+        return $ Map.keys watched
+    ) action
 
 -- | IO interpreter for FileWatcher effect
 -- Tracks file modification times and content to detect changes
