@@ -30,7 +30,7 @@
 --   main <- readFile @MainRepo \"config.yaml\"
 --   dep <- readFile @DepRepo \"lib/code.hs\"
 -- @
-module Runix.FileSystem.Effects where
+module Runix.FileSystem where
 
 import Data.Kind (Type)
 import Polysemy
@@ -48,8 +48,8 @@ import Data.Time (UTCTime)
 import Control.Monad (forM)
 import qualified Data.List
 import GHC.Stack
-import qualified Runix.FileSystem.System.Effects as System
-import Runix.Logging.Effects (Logging, info)
+import qualified Runix.FileSystem.System as System
+import Runix.Logging (Logging, info)
 import qualified System.Directory
 import System.IO.Error (tryIOError)
 

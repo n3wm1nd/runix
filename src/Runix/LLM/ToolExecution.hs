@@ -17,7 +17,7 @@ import qualified Data.Aeson as Aeson
 
 import UniversalLLM.Core.Tools (LLMTool, executeToolCallFromList)
 import UniversalLLM.Core.Types (ToolCall(..), ToolResult(..))
-import Runix.Logging.Effects (Logging, info, warning)
+import Runix.Logging (Logging, info, warning)
 
 -- | Execute a tool call with automatic logging
 -- Logs tool name, arguments, and results

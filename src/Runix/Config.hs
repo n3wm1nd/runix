@@ -8,7 +8,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Runix.Config.Effects where 
+module Runix.Config where 
 import Data.Kind (Type)
 import Polysemy
 

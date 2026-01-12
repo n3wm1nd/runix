@@ -11,7 +11,7 @@
 --
 -- This module provides an in-memory filesystem interpreter that uses
 -- a Map for storage. Useful for testing without touching the real filesystem.
-module Runix.FileSystem.InMemory.Effects
+module Runix.FileSystem.InMemory
   ( InMemoryFS
   , filesystemReadInMemory
   , filesystemWriteInMemory
@@ -27,8 +27,8 @@ import Data.Map.Strict (Map)
 import System.FilePath
 import Data.List (sort, isPrefixOf)
 import qualified System.FilePath.Glob as Glob
-import Runix.FileSystem.System.Effects
-import qualified Runix.FileSystem.Effects as Param
+import Runix.FileSystem.System
+import qualified Runix.FileSystem as Param
 
 -- | In-memory filesystem represented as a map from absolute paths to file contents
 type InMemoryFS = Map FilePath ByteString

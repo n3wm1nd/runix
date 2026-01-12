@@ -31,13 +31,13 @@ import Autodocodec (HasCodec)
 import Data.Default (Default)
 
 import Runix.LLM.Interpreter (interpretAnthropicOAuth)
-import Runix.LLM.Effects (LLM, queryLLM)
-import Runix.HTTP.Effects (HTTP, HTTPStreaming, HTTPResponse(..))
-import qualified Runix.HTTP.Effects as HTTPEff
-import Runix.Logging.Effects (Logging, loggingNull)
-import Runix.Secret.Effects (runSecret)
-import Runix.Cancellation.Effects (cancelNoop)
-import Runix.Streaming.Effects (ignoreChunks)
+import Runix.LLM (LLM, queryLLM)
+import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
+import qualified Runix.HTTP as HTTPEff
+import Runix.Logging (Logging, loggingNull)
+import Runix.Secret (runSecret)
+import Runix.Cancellation (cancelNoop)
+import Runix.Streaming (ignoreChunks)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
 import qualified FileSystemSecuritySpec

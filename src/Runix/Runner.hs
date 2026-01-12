@@ -18,15 +18,15 @@ module Runix.Runner (
     runUntrusted,
     SafeEffects,
     -- Re-exports from other modules
-    module Runix.FileSystem.System.Effects,
-    module Runix.Grep.Effects,
-    module Runix.Bash.Effects,
-    module Runix.Cmd.Effects,
-    module Runix.HTTP.Effects,
-    module Runix.Logging.Effects,
-    module Runix.Secret.Effects,
-    module Runix.Compiler.Effects,
-    module Runix.Streaming.Effects,
+    module Runix.FileSystem.System,
+    module Runix.Grep,
+    module Runix.Bash,
+    module Runix.Cmd,
+    module Runix.HTTP,
+    module Runix.Logging,
+    module Runix.Secret,
+    module Runix.Compiler,
+    module Runix.Streaming,
     Coding
 ) where
 
@@ -39,21 +39,21 @@ import Polysemy.Fail
 import Polysemy.Error
 
 -- Local modules
-import Runix.FileSystem.System.Effects
-import Runix.Grep.Effects
-import Runix.Bash.Effects
-import Runix.Cmd.Effects
-import Runix.HTTP.Effects
-import Runix.Logging.Effects
-import Runix.Secret.Effects
-import Runix.Compiler.Effects
-import Runix.Streaming.Effects
-import Runix.Cancellation.Effects (Cancellation, cancelNoop)
+import Runix.FileSystem.System
+import Runix.Grep
+import Runix.Bash
+import Runix.Cmd
+import Runix.HTTP
+import Runix.Logging
+import Runix.Secret
+import Runix.Compiler
+import Runix.Streaming
+import Runix.Cancellation (Cancellation, cancelNoop)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 import UniversalLLM (Model(..))
-import Runix.LLM.Effects
+import Runix.LLM
 
 -- External libraries
 import qualified Data.Text as T

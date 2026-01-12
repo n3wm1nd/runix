@@ -11,7 +11,7 @@ module Runix.Compiler.Compiler
         compile
     ) where
 
-import Runix.Compiler.Effects
+import Runix.Compiler
 import qualified Runix.Compiler.Cabal as CC
 import qualified Distribution.ModuleName
 

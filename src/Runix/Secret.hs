@@ -9,7 +9,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Runix.Secret.Effects where
+module Runix.Secret where
 import Polysemy
 import Polysemy.Fail
 import Data.Kind (Type)

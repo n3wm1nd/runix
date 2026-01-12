@@ -14,8 +14,8 @@
 -- This module provides direct access to the system filesystem without
 -- access control, filtering, or sandboxing. Use this when you need
 -- unrestricted filesystem access. For scoped or filtered access, use
--- the parameterized effects in Runix.FileSystem.Effects.
-module Runix.FileSystem.System.Effects
+-- the parameterized effects in Runix.FileSystem.
+module Runix.FileSystem.System
   ( -- * Effects
     FileSystemRead(..)
   , FileSystemWrite(..)
@@ -51,7 +51,7 @@ import Data.String (fromString)
 import GHC.Stack
 import qualified System.Directory
 import qualified System.FilePath.Glob as Glob
-import Runix.Logging.Effects (Logging, info)
+import Runix.Logging (Logging, info)
 import System.IO.Error (tryIOError, userError)
 
 -- | Read-only filesystem operations

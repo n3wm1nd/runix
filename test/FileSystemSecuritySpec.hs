@@ -19,9 +19,9 @@ import System.FilePath (normalise, isAbsolute, (</>) , splitPath, addTrailingPat
 import Prelude hiding (readFile)
 import Data.List (isInfixOf, isPrefixOf)
 
-import Runix.FileSystem.Effects
-import qualified Runix.FileSystem.System.Effects as System
-import Runix.FileSystem.InMemory.Effects (InMemoryFS, filesystemInMemory)
+import Runix.FileSystem
+import qualified Runix.FileSystem.System as System
+import Runix.FileSystem.InMemory (InMemoryFS, filesystemInMemory)
 
 --------------------------------------------------------------------------------
 -- Test Project Type

@@ -24,8 +24,8 @@ import Data.Map.Strict (Map)
 import Prelude hiding (readFile)
 import Data.List (isInfixOf)
 
-import Runix.FileSystem.System.Effects
-import Runix.FileSystem.InMemory.Effects
+import Runix.FileSystem.System
+import Runix.FileSystem.InMemory
 
 --------------------------------------------------------------------------------
 -- Test Helpers

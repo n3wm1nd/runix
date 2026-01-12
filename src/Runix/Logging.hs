@@ -9,7 +9,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Runix.Logging.Effects where
+module Runix.Logging where
 import Polysemy
 import Polysemy.Error
 import Polysemy.Fail

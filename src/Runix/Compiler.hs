@@ -5,7 +5,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE DataKinds #-}
 
-module Runix.Compiler.Effects where
+module Runix.Compiler where
 
 import Polysemy
 import Data.Kind (Type)

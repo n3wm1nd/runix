@@ -12,13 +12,13 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Runix.RestAPI.Effects where
+module Runix.RestAPI where
 import Polysemy
 import Polysemy.Fail
 import Data.Aeson
 import Data.Kind (Type)
 import GHC.Stack
-import Runix.HTTP.Effects
+import Runix.HTTP
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import System.FilePath
 

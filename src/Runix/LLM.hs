@@ -10,7 +10,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Runix.LLM.Effects
+module Runix.LLM
   ( -- * LLM Effect
     LLM(..)
   , queryLLM

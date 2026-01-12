@@ -9,16 +9,16 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Runix.Bash.Effects where
+module Runix.Bash where
 
 import Data.Kind (Type)
 import Data.Text (Text)
 import Data.String (fromString)
 import Polysemy
 import GHC.Stack
-import Runix.Cmd.Effects (Cmd, cmdExec)
-import qualified Runix.Cmd.Effects as CmdE
-import Runix.Logging.Effects (Logging, info)
+import Runix.Cmd (Cmd, cmdExec)
+import qualified Runix.Cmd as CmdE
+import Runix.Logging (Logging, info)
 
 -- | Result from bash command execution
 data BashOutput = BashOutput

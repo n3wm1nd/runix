@@ -22,7 +22,7 @@ import Data.Aeson.Types (parseEither)
 import GHC.Generics (Generic, Rep, M1(..), K1(..), from, to, D, C, S)
 import Polysemy
 import Polysemy.Fail
-import Runix.LLM.Effects (LLM, askLLM)
+import Runix.LLM (LLM, askLLM)
 import Autodocodec
 import Autodocodec.Schema
 

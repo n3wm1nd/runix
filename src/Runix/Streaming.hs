@@ -8,7 +8,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-module Runix.Streaming.Effects where
+module Runix.Streaming where
 
 import Polysemy
 import Polysemy.State

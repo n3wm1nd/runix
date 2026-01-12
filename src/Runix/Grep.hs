@@ -9,7 +9,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Runix.Grep.Effects where
+module Runix.Grep where
 
 import Data.Kind (Type)
 import Data.Text (Text)
@@ -22,10 +22,10 @@ import Data.Map.Strict (Map)
 import Polysemy
 import Polysemy.Fail (Fail)
 import GHC.Stack
-import Runix.Cmd.Effects (Cmd, cmdExec)
-import qualified Runix.Cmd.Effects as CmdE
-import Runix.Logging.Effects (Logging, info)
-import Runix.FileSystem.System.Effects (FileSystemRead, fileExists)
+import Runix.Cmd (Cmd, cmdExec)
+import qualified Runix.Cmd as CmdE
+import Runix.Logging (Logging, info)
+import Runix.FileSystem.System (FileSystemRead, fileExists)
 
 -- | Grep search result
 data GrepMatch = GrepMatch

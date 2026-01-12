@@ -9,7 +9,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Runix.Cmd.Effects where
+module Runix.Cmd where
 
 import Data.Kind (Type)
 import Data.Text (Text)

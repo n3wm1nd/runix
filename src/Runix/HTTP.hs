@@ -12,7 +12,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Runix.HTTP.Effects where
+module Runix.HTTP where
 import Prelude
 import Polysemy
 import Polysemy.Fail
@@ -25,9 +25,9 @@ import GHC.Stack
 import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro, responseBody)
-import Runix.Logging.Effects (Logging, info)
-import Runix.Cancellation.Effects (Cancellation, isCanceled)
-import Runix.Streaming.Effects (StreamChunk, emitChunk)
+import Runix.Logging (Logging, info)
+import Runix.Cancellation (Cancellation, isCanceled)
+import Runix.Streaming (StreamChunk, emitChunk)
 import Conduit
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM

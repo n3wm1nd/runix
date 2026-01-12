@@ -43,12 +43,12 @@ import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
-import Runix.LLM.Effects (LLM(..), queryLLM)
-import Runix.HTTP.Effects (HTTP, HTTPStreaming, HTTPResponse(..))
-import Runix.RestAPI.Effects (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming)
-import Runix.Secret.Effects (Secret, getSecret)
+import Runix.LLM (LLM(..), queryLLM)
+import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
+import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming)
+import Runix.Secret (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
-import Runix.Cancellation.Effects (Cancellation, onCancellation)
+import Runix.Cancellation (Cancellation, onCancellation)
 import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
 
@@ -213,8 +213,8 @@ interpretAnthropicOAuthWithState composableProvider action = do
                         -- Streaming: reassemble SSE into typed response
                         httpResp <- postStreaming (Endpoint "messages") requestValue
                         -- Check HTTP status code for streaming responses
-                        let respCode = Runix.HTTP.Effects.code httpResp
-                            respBody = Runix.HTTP.Effects.body httpResp
+                        let respCode = Runix.HTTP.code httpResp
+                            respBody = Runix.HTTP.body httpResp
                         if respCode >= 200 && respCode < 300
                           then do
                             let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)

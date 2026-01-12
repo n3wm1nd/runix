@@ -21,9 +21,9 @@ import Prelude hiding (readFile)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import qualified System.FilePath.Glob as Glob
 
-import Runix.FileSystem.Effects
-import qualified Runix.FileSystem.System.Effects as System
-import Runix.FileSystem.InMemory.Effects
+import Runix.FileSystem
+import qualified Runix.FileSystem.System as System
+import Runix.FileSystem.InMemory
 
 --------------------------------------------------------------------------------
 -- In-Memory Filesystem for Testing

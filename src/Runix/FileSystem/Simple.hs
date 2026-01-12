@@ -12,7 +12,7 @@
 --
 -- This module provides a simplified interface for code that only needs
 -- to work with a single filesystem. It's implemented as type aliases over
--- the parameterized effects from Runix.FileSystem.Effects using a Default marker type.
+-- the parameterized effects from Runix.FileSystem using a Default marker type.
 --
 -- Use this when you have a single "default" filesystem and don't need
 -- multiple independent filesystem views.
@@ -25,14 +25,14 @@
 --   content <- readFile \"config.yaml\"
 --   files <- listFiles \".\"
 -- @
-module Runix.FileSystem.Simple.Effects where
+module Runix.FileSystem.Simple where
 
 import Polysemy
 import Prelude hiding (readFile, writeFile)
 import Polysemy.Fail
-import qualified Runix.FileSystem.Effects as Parameterized
-import qualified Runix.FileSystem.System.Effects as System
-import Runix.Logging.Effects (Logging)
+import qualified Runix.FileSystem as Parameterized
+import qualified Runix.FileSystem.System as System
+import Runix.Logging (Logging)
 import Data.ByteString (ByteString)
 
 -- | Default marker type for simple (non-parameterized) filesystem operations

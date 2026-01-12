@@ -7,7 +7,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Runix.Cancellation.Effects
+module Runix.Cancellation
   ( Cancellation(..)
   , isCanceled
   , cancelNoop
