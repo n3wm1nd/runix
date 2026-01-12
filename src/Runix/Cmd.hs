@@ -8,6 +8,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Runix.Cmd where
 
@@ -62,3 +63,61 @@ cmdIO = interpret $ \case
                 ExitSuccess -> 0
                 ExitFailure c -> c
         return $ CmdOutput code (T.pack stdout) (T.pack stderr)
+
+--------------------------------------------------------------------------------
+-- Parametrized Single-Command Effect (Optional Type-Level Restriction)
+--------------------------------------------------------------------------------
+
+-- | Parametrized effect for executing a single specific command
+-- This provides type-level guarantees about which command can be executed
+--
+-- Example usage:
+--
+-- @
+-- newtype GitCmd = GitCmd FilePath
+-- instance HasCommand GitCmd where
+--   getCommandPath (GitCmd path) = path
+--
+-- myFunc :: Member (CmdSingle GitCmd) r => Sem r ()
+-- myFunc = do
+--   output <- execCommand [\"status\"]
+--   -- Can only run git, not arbitrary commands
+-- @
+data CmdSingle command (m :: Type -> Type) a where
+    -- | Execute the command with arguments and stdin in current directory
+    ExecCommand :: [String] -> ByteString -> CmdSingle command m CmdOutput
+
+-- | Typeclass for extracting command path from command types
+class HasCommand command where
+    -- | Get the executable path for this command
+    getCommandPath :: command -> FilePath
+
+    -- | Optionally validate/transform arguments before execution
+    -- Default implementation: accept all arguments as-is
+    validateArgs :: command -> [String] -> Either String [String]
+    validateArgs _ args = Right args
+
+-- | Execute command with arguments in current working directory (no stdin)
+execCommand :: Member (CmdSingle command) r => [String] -> Sem r CmdOutput
+execCommand args = send (ExecCommand args BS.empty)
+
+-- | Execute command with arguments and stdin in current working directory
+execCommandStdin :: Member (CmdSingle command) r
+                 => [String] -> ByteString -> Sem r CmdOutput
+execCommandStdin args stdinContent = send (ExecCommand args stdinContent)
+
+-- | Interpret CmdSingle on top of base Cmd effect
+-- This is the standard way to run a CmdSingle effect
+interpretCmdSingle :: forall command r a.
+                      ( HasCommand command
+                      , Member Cmd r
+                      )
+                   => command
+                   -> Sem (CmdSingle command : r) a
+                   -> Sem r a
+interpretCmdSingle cmd = interpret $ \case
+    ExecCommand args stdinContent ->
+        case validateArgs cmd args of
+            Left err -> return $ CmdOutput 1 T.empty (T.pack err)
+            Right validArgs ->
+                send (CmdExecWithStdin "." (getCommandPath cmd) validArgs stdinContent)
