@@ -9,6 +9,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Runix.Cmd where
 
@@ -17,8 +18,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Word (Word8)
 import Data.Char (chr)
+import Data.Proxy (Proxy(..))
+import GHC.TypeLits (Symbol, KnownSymbol, symbolVal)
 import Polysemy
 import qualified System.Process as Process
 import System.Exit (ExitCode(..))
@@ -68,56 +70,43 @@ cmdIO = interpret $ \case
 -- Parametrized Single-Command Effect (Optional Type-Level Restriction)
 --------------------------------------------------------------------------------
 
--- | Parametrized effect for executing a single specific command
+-- | Parametrized effect for executing a single specific command using type-level strings
 -- This provides type-level guarantees about which command can be executed
+-- The interface is identical to Cmd, just with the command name fixed at the type level
 --
 -- Example usage:
 --
 -- @
--- newtype GitCmd = GitCmd FilePath
--- instance HasCommand GitCmd where
---   getCommandPath (GitCmd path) = path
---
--- myFunc :: Member (CmdSingle GitCmd) r => Sem r ()
+-- myFunc :: Member (CmdSingle \"git\") r => Sem r ()
 -- myFunc = do
---   output <- execCommand [\"status\"]
+--   output <- call @\"git\" [\"status\"]
 --   -- Can only run git, not arbitrary commands
 -- @
-data CmdSingle command (m :: Type -> Type) a where
-    -- | Execute the command with arguments and stdin in current directory
-    ExecCommand :: [String] -> ByteString -> CmdSingle command m CmdOutput
+data CmdSingle (command :: Symbol) (m :: Type -> Type) a where
+    -- | Call command with arguments in a specific working directory with stdin
+    CmdSingleExecWithStdin :: FilePath -> [String] -> ByteString -> CmdSingle command m CmdOutput
 
--- | Typeclass for extracting command path from command types
-class HasCommand command where
-    -- | Get the executable path for this command
-    getCommandPath :: command -> FilePath
+-- | Call command in a specific working directory with no stdin
+callIn :: forall command r. Member (CmdSingle command) r => FilePath -> [String] -> Sem r CmdOutput
+callIn cwd args = send @(CmdSingle command) (CmdSingleExecWithStdin cwd args BS.empty)
 
-    -- | Optionally validate/transform arguments before execution
-    -- Default implementation: accept all arguments as-is
-    validateArgs :: command -> [String] -> Either String [String]
-    validateArgs _ args = Right args
+-- | Call command in current working directory with no stdin
+call :: forall command r. Member (CmdSingle command) r => [String] -> Sem r CmdOutput
+call args = callIn @command "." args
 
--- | Execute command with arguments in current working directory (no stdin)
-execCommand :: Member (CmdSingle command) r => [String] -> Sem r CmdOutput
-execCommand args = send (ExecCommand args BS.empty)
-
--- | Execute command with arguments and stdin in current working directory
-execCommandStdin :: Member (CmdSingle command) r
-                 => [String] -> ByteString -> Sem r CmdOutput
-execCommandStdin args stdinContent = send (ExecCommand args stdinContent)
+-- | Call command with stdin in current working directory
+callStdin :: forall command r. Member (CmdSingle command) r => [String] -> ByteString -> Sem r CmdOutput
+callStdin args stdinContent = send @(CmdSingle command) (CmdSingleExecWithStdin "." args stdinContent)
 
 -- | Interpret CmdSingle on top of base Cmd effect
--- This is the standard way to run a CmdSingle effect
+-- The command name is extracted from the type-level string
 interpretCmdSingle :: forall command r a.
-                      ( HasCommand command
+                      ( KnownSymbol command
                       , Member Cmd r
                       )
-                   => command
-                   -> Sem (CmdSingle command : r) a
+                   => Sem (CmdSingle command : r) a
                    -> Sem r a
-interpretCmdSingle cmd = interpret $ \case
-    ExecCommand args stdinContent ->
-        case validateArgs cmd args of
-            Left err -> return $ CmdOutput 1 T.empty (T.pack err)
-            Right validArgs ->
-                send (CmdExecWithStdin "." (getCommandPath cmd) validArgs stdinContent)
+interpretCmdSingle = interpret $ \case
+    CmdSingleExecWithStdin cwd args stdinContent ->
+        let commandName = symbolVal (Proxy @command)
+        in send (CmdExecWithStdin cwd commandName args stdinContent)
