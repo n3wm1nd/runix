@@ -16,7 +16,7 @@ module Runix.LLM.ToolInstances where
 
 import Polysemy (Sem)
 import Data.Proxy (Proxy(..))
-import UniversalLLM.Core.Tools
+import UniversalLLM.Tools
   ( Callable(..)
   , Tool(..)
   , ToolFunction(..)

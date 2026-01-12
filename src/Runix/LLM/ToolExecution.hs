@@ -15,8 +15,8 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.Aeson as Aeson
 
-import UniversalLLM.Core.Tools (LLMTool, executeToolCallFromList)
-import UniversalLLM.Core.Types (ToolCall(..), ToolResult(..))
+import UniversalLLM.Tools (LLMTool, executeToolCallFromList)
+import UniversalLLM (ToolCall(..), ToolResult(..))
 import Runix.Logging (Logging, info, warning)
 
 -- | Execute a tool call with automatic logging

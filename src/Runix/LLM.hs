@@ -45,7 +45,7 @@ import UniversalLLM
   )
 
 -- Re-export tool system
-import UniversalLLM.Core.Tools (LLMTool(..))
+import UniversalLLM.Tools (LLMTool(..))
 
 -- Re-export orphan instances for Tool system
 -- This ensures anyone using LLM effects automatically gets the instances they need
