@@ -22,7 +22,7 @@ import Data.Map.Strict (Map)
 import Polysemy
 import Polysemy.Fail (Fail)
 import GHC.Stack
-import Runix.Cmd (Cmd, cmdExec)
+import Runix.Cmd (Cmds, cmdsExec)
 import qualified Runix.Cmd as CmdE
 import Runix.Logging (Logging, info)
 import Runix.FileSystem.System (FileSystemRead, fileExists)
@@ -43,11 +43,11 @@ makeSem ''Grep
 
 -- TODO: this is using the filesystem.system effects, it should work with any filesystem that translates to system paths
 -- | Grep interpreter using ripgrep
-grepIO :: HasCallStack => Members [Cmd, Logging, FileSystemRead, Fail] r => Sem (Grep : r) a -> Sem r a
+grepIO :: HasCallStack => Members [Cmds, Logging, FileSystemRead, Fail] r => Sem (Grep : r) a -> Sem r a
 grepIO = interpret $ \case
     GrepSearch basePath pattern -> do
         info $ fromString "grep search: " <> fromString pattern <> fromString " in " <> fromString basePath
-        result <- cmdExec "rg" ["--line-number", "--with-filename", "--", pattern, basePath]
+        result <- cmdsExec "rg" ["--line-number", "--with-filename", "--", pattern, basePath]
         let allMatches = case CmdE.exitCode result of
                 0 -> parseRipgrepOutput $ lines $ T.unpack $ CmdE.stdout result
                 _ -> []
