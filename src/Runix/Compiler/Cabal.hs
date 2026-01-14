@@ -19,7 +19,7 @@ import Distribution.Simple
 import Distribution.Types.BuildInfo
 import Distribution.Types.Library
 import Distribution.Types.PackageDescription
-import Distribution.Utils.Path
+import qualified Distribution.Utils.Path as UPath
 
 
 data Project = Project {
@@ -94,7 +94,7 @@ packageDescription project =
             otherModules = omods,
             targetBuildDepends = maindep : project.dependencies,
             -- this is completely fine, but will change with future cabal releases
-            hsSourceDirs = [ unsafeMakeSymbolicPath "src" ]
+            hsSourceDirs = [ UPath.unsafeMakeSymbolicPath "src" ]
         }
     }
 
