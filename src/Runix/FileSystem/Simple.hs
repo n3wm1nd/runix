@@ -117,7 +117,7 @@ withDefaultFileSystemWrite = interpret $ \case
 
 -- | IO-based interpreter for simple filesystem effects
 -- This interprets the simple FileSystemRead and FileSystemWrite effects directly to System effects then IO
-filesystemIO :: (Member (Embed IO) r,  Member Logging r) => 
+filesystemIO :: (Member (Embed IO) r,  Member Logging r, Member Fail r) =>
   Sem (FileSystemWrite : FileSystemRead : FileSystem :r)   a -> Sem r a
 filesystemIO =
   System.filesystemReadIO . System.filesystemWriteIO . Parameterized.fileSystemLocal "/"

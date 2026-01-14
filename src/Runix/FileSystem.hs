@@ -133,6 +133,55 @@ instance HasProjectPath FilePath where
   getProjectPath = id
 
 --------------------------------------------------------------------------------
+-- Path Translation Utilities (for chroot and external tools)
+--------------------------------------------------------------------------------
+
+-- | Translate a chroot-relative path to a system path
+-- Takes the virtual CWD (as seen inside chroot) and a user-provided path
+-- Returns the actual system path that should be used for IO operations
+translateToSystemPath :: HasProjectPath project
+                      => project  -- ^ Project configuration
+                      -> FilePath  -- ^ Virtual CWD inside chroot (e.g., "/subdir")
+                      -> FilePath  -- ^ User-provided path (chroot-relative or absolute within chroot)
+                      -> FilePath  -- ^ System path
+translateToSystemPath proj virtualCwd userPath
+  | isAbsolute userPath = root </> dropWhile (== '/') userPath  -- Absolute within chroot
+  | otherwise = root </> virtualCwdRelative </> userPath  -- Relative to virtual CWD
+  where
+    root = getProjectPath proj
+    virtualCwdRelative = dropWhile (== '/') virtualCwd
+
+-- | Translate a system absolute path back to chroot-relative path
+-- E.g., "/home/user/.local/share/runix-code/generated-tools/Foo.hs" -> "/generated-tools/Foo.hs"
+translateFromSystemPath :: HasProjectPath project
+                        => project  -- ^ Project configuration
+                        -> FilePath  -- ^ System absolute path
+                        -> FilePath  -- ^ Chroot-relative path
+translateFromSystemPath proj systemPath =
+  let root = getProjectPath proj
+      relative = makeRelative root systemPath
+  in if relative == "." then "/" else "/" </> relative
+
+-- | Translate a system absolute path back, preserving relative/absolute format
+-- If the input was relative, return relative to virtualCwd
+-- If the input was absolute, return absolute within chroot
+translateFromSystemPath' :: HasProjectPath project
+                         => project    -- ^ Project configuration
+                         -> FilePath   -- ^ Virtual CWD (chroot-relative)
+                         -> Bool       -- ^ Whether input was absolute
+                         -> FilePath   -- ^ System absolute path
+                         -> FilePath   -- ^ Chroot path (relative or absolute)
+translateFromSystemPath' proj virtualCwd inputWasAbsolute systemPath
+  | inputWasAbsolute = translateFromSystemPath proj systemPath
+  | otherwise =
+      -- Input was relative, return relative to virtual CWD
+      let chrootAbsolute = translateFromSystemPath proj systemPath
+          -- Remove leading / to make it relative to root, then make relative to virtualCwd
+          chrootRelativeToRoot = dropWhile (== '/') chrootAbsolute
+          virtualCwdRelative = dropWhile (== '/') virtualCwd
+      in makeRelative virtualCwdRelative chrootRelativeToRoot
+
+--------------------------------------------------------------------------------
 -- Local Filesystem Interpreter
 --------------------------------------------------------------------------------
 
@@ -177,66 +226,80 @@ fileSystemFromSystem project action =
 -- Translates absolute paths and GetCwd to chroot coordinates
 chrootFileSystem :: forall project r a.
                     ( HasProjectPath project
-                    , Members [FileSystemRead project, FileSystemWrite project, FileSystem project] r
+                    , Members [FileSystemRead project, FileSystemWrite project, FileSystem project, Fail] r
                     )
                  => Sem r a
                  -> Sem r a
 chrootFileSystem action =
   interceptFileSystem . interceptFileSystemRead . interceptFileSystemWrite $ action
   where
-    -- Prepend root only for absolute paths (strip leading / first)
-    chrootPath :: FilePath -> FilePath -> FilePath
-    chrootPath root p = if isAbsolute p then root </> dropWhile (== '/') p else p
+    -- Helper to get virtual CWD from system CWD
+    getVirtualCwd :: Members [FileSystem project, Fail] r' => Sem r' FilePath
+    getVirtualCwd = do
+      proj <- send (GetFileSystem @project)
+      systemCwd <- getCwd @project
+      let root = getProjectPath proj
+          relative = makeRelative root systemCwd
+      return $ if relative == "." then "/" else "/" </> relative
 
-    interceptFileSystem :: Member (FileSystem project) r' => Sem r' a' -> Sem r' a'
+    interceptFileSystem :: Members [FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
     interceptFileSystem = intercept $ \case
       GetFileSystem -> send (GetFileSystem @project)
       GetCwd -> do
-        proj <- send (GetFileSystem @project)
-        cwdResult <- send (GetCwd @project)
-        case cwdResult of
-          Left err -> return $ Left err
-          Right systemCwd -> do
-            let root = getProjectPath proj
-                relative = makeRelative root systemCwd
-                chrootCwd = if relative == "." then "/" else "/" </> relative
-            return $ Right chrootCwd
+        virtualCwd <- getVirtualCwd
+        return $ Right virtualCwd
       ListFiles p -> do
         proj <- send (GetFileSystem @project)
-        send (ListFiles @project (chrootPath (getProjectPath proj) p))
+        virtualCwd <- getVirtualCwd
+        let systemPath = translateToSystemPath proj virtualCwd p
+            inputWasAbsolute = isAbsolute p
+        result <- send (ListFiles @project systemPath)
+        -- Translate results back, preserving relative/absolute format
+        return $ fmap (map (translateFromSystemPath' proj virtualCwd inputWasAbsolute)) result
       FileExists p -> do
         proj <- send (GetFileSystem @project)
-        send (FileExists @project (chrootPath (getProjectPath proj) p))
+        virtualCwd <- getVirtualCwd
+        send (FileExists @project (translateToSystemPath proj virtualCwd p))
       IsDirectory p -> do
         proj <- send (GetFileSystem @project)
-        send (IsDirectory @project (chrootPath (getProjectPath proj) p))
+        virtualCwd <- getVirtualCwd
+        send (IsDirectory @project (translateToSystemPath proj virtualCwd p))
       Glob base pat -> do
         proj <- send (GetFileSystem @project)
-        send (Glob @project (chrootPath (getProjectPath proj) base) pat)
+        virtualCwd <- getVirtualCwd
+        let systemPath = translateToSystemPath proj virtualCwd base
+            inputWasAbsolute = isAbsolute base
+        result <- send (Glob @project systemPath pat)
+        -- Translate results back, preserving relative/absolute format
+        return $ fmap (map (translateFromSystemPath' proj virtualCwd inputWasAbsolute)) result
 
-    interceptFileSystemRead :: Members [FileSystemRead project, FileSystem project] r' => Sem r' a' -> Sem r' a'
+    interceptFileSystemRead :: Members [FileSystemRead project, FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
     interceptFileSystemRead = intercept $ \case
       ReadFile p -> do
         proj <- send (GetFileSystem @project)
-        send (ReadFile @project (chrootPath (getProjectPath proj) p))
+        virtualCwd <- getVirtualCwd
+        send (ReadFile @project (translateToSystemPath proj virtualCwd p))
 
-    interceptFileSystemWrite :: Members [FileSystemWrite project, FileSystem project] r' => Sem r' a' -> Sem r' a'
+    interceptFileSystemWrite :: Members [FileSystemWrite project, FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
     interceptFileSystemWrite = intercept $ \case
       WriteFile p d -> do
         proj <- send (GetFileSystem @project)
-        send (WriteFile @project (chrootPath (getProjectPath proj) p) d)
+        virtualCwd <- getVirtualCwd
+        send (WriteFile @project (translateToSystemPath proj virtualCwd p) d)
       CreateDirectory createParents p -> do
         proj <- send (GetFileSystem @project)
-        send (CreateDirectory @project createParents (chrootPath (getProjectPath proj) p))
+        virtualCwd <- getVirtualCwd
+        send (CreateDirectory @project createParents (translateToSystemPath proj virtualCwd p))
       Remove recursive p -> do
         proj <- send (GetFileSystem @project)
-        send (Remove @project recursive (chrootPath (getProjectPath proj) p))
+        virtualCwd <- getVirtualCwd
+        send (Remove @project recursive (translateToSystemPath proj virtualCwd p))
 
 -- | Interpret filesystem effects for a local directory (with chroot)
 -- All paths are relative to the project root
 fileSystemLocal :: forall project r a.
                    ( HasProjectPath project
-                   , Members [System.FileSystemRead, System.FileSystemWrite] r
+                   , Members [System.FileSystemRead, System.FileSystemWrite, Fail] r
                    )
                  => project
                  -> Sem (FileSystemWrite project : FileSystemRead project : FileSystem project : r) a
