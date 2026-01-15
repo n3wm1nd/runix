@@ -41,8 +41,10 @@ import Runix.Streaming (ignoreChunks)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
 import qualified FileSystemSecuritySpec
+import qualified FileSystemSecurityProperties
 import qualified FileSystemProjectSpec
 import qualified DummyFileSystemSpec
+import qualified GrepSecuritySpec
 
 -- ============================================================================
 -- Test Models
@@ -147,7 +149,11 @@ main = do
 
     describe "FileSystem Security" FileSystemSecuritySpec.spec
 
+    describe "FileSystem Security Properties" FileSystemSecurityProperties.spec
+
     describe "FileSystem Project Effects" FileSystemProjectSpec.spec
+
+    describe "Grep Security" GrepSecuritySpec.spec
 
     describe "SSE Parser Unit Tests" SSEParserSpec.spec
 

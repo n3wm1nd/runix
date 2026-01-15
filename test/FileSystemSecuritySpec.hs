@@ -21,6 +21,7 @@ import Data.List (isInfixOf, isPrefixOf)
 
 import Runix.FileSystem
 import qualified Runix.FileSystem.System as System
+import qualified Runix.FileSystem.Path as Path
 import Runix.FileSystem.InMemory (InMemoryFS, filesystemInMemory)
 
 --------------------------------------------------------------------------------
@@ -67,19 +68,60 @@ runFS cwd fs prog =
     . filesystemInMemory cwd fs proj
     $ prog
 
+-- | Run filesystem test with chroot layer
+-- This tests that security filters work with chrooted filesystem
+runFSWithChroot :: FilePath -> InMemoryFS
+                -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Fail, Error String] a
+                -> Either String a
+runFSWithChroot projectRoot fs prog =
+  let proj = SecurityTest projectRoot
+  in run
+    . runError @String
+    . failToError id
+    . filesystemInMemory "/" fs proj  -- In-memory backend
+    . chrootFileSystem @SecurityTest  -- Chroot layer - translates paths
+    $ prog
+
+-- | Run filesystem test with filter applied BEFORE chroot
+-- The filter sees system paths like "/project/file.txt"
+runFSFilterBeforeChroot :: FilePath -> InMemoryFS -> PathFilter
+                        -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Fail, Error String] a
+                        -> Either String a
+runFSFilterBeforeChroot projectRoot fs pathFilter prog =
+  let proj = SecurityTest projectRoot
+  in run
+    . runError @String
+    . failToError id
+    . filesystemInMemory "/" fs proj
+    . filterFileSystem @SecurityTest pathFilter  -- Filter before chroot
+    . filterRead @SecurityTest pathFilter
+    . chrootFileSystem @SecurityTest  -- Chroot after filter
+    $ prog
+
+-- | Run filesystem test with filter applied AFTER chroot
+-- The filter sees chroot-relative paths like "/file.txt"
+runFSFilterAfterChroot :: FilePath -> InMemoryFS -> PathFilter
+                       -> Sem '[FileSystemWrite SecurityTest, FileSystemRead SecurityTest, FileSystem SecurityTest, Fail, Error String] a
+                       -> Either String a
+runFSFilterAfterChroot projectRoot fs pathFilter prog =
+  let proj = SecurityTest projectRoot
+  in run
+    . runError @String
+    . failToError id
+    . filesystemInMemory "/" fs proj
+    . chrootFileSystem @SecurityTest  -- Chroot before filter
+    . filterFileSystem @SecurityTest pathFilter  -- Filter after chroot
+    . filterRead @SecurityTest pathFilter
+    $ prog
+
 --------------------------------------------------------------------------------
 -- Tests
 --------------------------------------------------------------------------------
 
--- Test isPathAllowed logic directly
+-- Test isPathAllowed logic directly using the new Path module
 testIsPathAllowed :: FilePath -> FilePath -> FilePath -> Bool
 testIsPathAllowed allowedPath cwd targetPath =
-  let normalizedAllowed = addTrailingPathSeparator $ System.basicResolvePath allowedPath
-      absoluteTarget = if isAbsolute targetPath
-                      then System.basicResolvePath targetPath
-                      else System.basicResolvePath (cwd </> targetPath)
-      normalizedTarget = addTrailingPathSeparator absoluteTarget
-  in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
+  Path.isPathAllowed allowedPath cwd targetPath
 
 spec :: Spec
 spec = do
@@ -578,6 +620,97 @@ spec = do
           result = runFSWithFail "/project" fs program
 
       result `shouldBe` Right "main source"
+
+  describe "limitToSubpath with Chroot - Filter BEFORE chroot" $ do
+    it "allows reading files within allowed path (filter sees system paths)" $ do
+      let fs = Map.fromList [("/project/file.txt", "content")]
+          -- Filter BEFORE chroot: use system path "/project"
+          result = runFSFilterBeforeChroot "/project" fs (limitToSubpath "/project")
+                   (readFile @SecurityTest "/file.txt")  -- This becomes "/project/file.txt"
+
+      result `shouldBe` Right "content"
+
+    it "blocks reading files outside allowed path (filter sees system paths)" $ do
+      let fs = Map.fromList
+            [ ("/project/file.txt", "allowed")
+            , ("/other/blocked.txt", "blocked")
+            ]
+          -- Filter BEFORE chroot: restrict to "/project/subdir" (system path)
+          -- Chroot to "/project", then try to read "/other" (absolute in chroot)
+          -- This becomes "/project/other" in system coords, outside "/project/subdir"
+          result = runFSFilterBeforeChroot "/project" fs (limitToSubpath "/project/subdir")
+                   (readFile @SecurityTest "/file.txt")
+
+      result `shouldSatisfy` \case
+        Left err -> "Access denied" `isInfixOf` err
+        Right _ -> False
+
+    it "allows listFiles within allowed subdirectory (filter sees system paths)" $ do
+      let fs = Map.fromList
+            [ ("/project/subdir/file1.txt", "content1")
+            , ("/project/subdir/file2.txt", "content2")
+            , ("/project/other.txt", "other")
+            ]
+          -- Filter BEFORE chroot: restrict to "/project/subdir" (system path)
+          result = runFSFilterBeforeChroot "/project" fs (limitToSubpath "/project/subdir")
+                   (listFiles @SecurityTest "/subdir")
+
+      case result of
+        Right files -> do
+          length files `shouldBe` 2  -- Should find 2 files in /subdir
+          all (\f -> "file" `isInfixOf` f && ".txt" `isInfixOf` f) files `shouldBe` True
+        Left err -> expectationFailure $ "listFiles failed: " ++ err
+
+  describe "limitToSubpath with Chroot - Filter AFTER chroot" $ do
+    it "allows reading files within chroot (filter sees chroot-relative paths)" $ do
+      let fs = Map.fromList [("/project/file.txt", "content")]
+          -- Filter AFTER chroot: use chroot-relative path "/"
+          result = runFSFilterAfterChroot "/project" fs (limitToSubpath "/")
+                   (readFile @SecurityTest "/file.txt")
+
+      result `shouldBe` Right "content"
+
+    it "blocks reading files outside allowed subdirectory (filter sees chroot-relative paths)" $ do
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "allowed")
+            , ("/project/other.txt", "blocked")
+            ]
+          -- Filter AFTER chroot: restrict to "/subdir" (chroot-relative)
+          result = runFSFilterAfterChroot "/project" fs (limitToSubpath "/subdir")
+                   (readFile @SecurityTest "/other.txt")
+
+      result `shouldSatisfy` \case
+        Left err -> "Access denied" `isInfixOf` err
+        Right _ -> False
+
+    it "allows listFiles within allowed subdirectory (filter sees chroot-relative paths)" $ do
+      let fs = Map.fromList
+            [ ("/project/subdir/file1.txt", "content1")
+            , ("/project/subdir/file2.txt", "content2")
+            , ("/project/other.txt", "other")
+            ]
+          -- Filter AFTER chroot: restrict to "/subdir" (chroot-relative)
+          result = runFSFilterAfterChroot "/project" fs (limitToSubpath "/subdir")
+                   (listFiles @SecurityTest "/subdir")
+
+      case result of
+        Right files -> do
+          length files `shouldBe` 2  -- Should find 2 files in /subdir
+          all (\f -> "file" `isInfixOf` f && ".txt" `isInfixOf` f) files `shouldBe` True
+        Left err -> expectationFailure $ "listFiles failed: " ++ err
+
+    it "blocks listFiles outside allowed subdirectory (filter sees chroot-relative paths)" $ do
+      let fs = Map.fromList
+            [ ("/project/subdir/file.txt", "allowed")
+            , ("/project/file.txt", "blocked")
+            ]
+          -- Filter AFTER chroot: restrict to "/subdir", but try to list "/"
+          result = runFSFilterAfterChroot "/project" fs (limitToSubpath "/subdir")
+                   (listFiles @SecurityTest "/")
+
+      result `shouldSatisfy` \case
+        Left err -> "Access denied" `isInfixOf` err
+        Right _ -> False
 
   describe "onlyClaude Filter" $ do
     it "onlyClaude filter allows .claude directory paths" $ do

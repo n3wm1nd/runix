@@ -52,6 +52,7 @@ import qualified Runix.FileSystem.System as System
 import Runix.Logging (Logging, info)
 import qualified System.Directory
 import System.IO.Error (tryIOError)
+import qualified Runix.FileSystem.Path as Path
 
 -- | Core filesystem effect - provides project metadata and structure exploration
 -- This allows seeing the directory tree without reading file contents
@@ -139,17 +140,26 @@ instance HasProjectPath FilePath where
 -- | Translate a chroot-relative path to a system path
 -- Takes the virtual CWD (as seen inside chroot) and a user-provided path
 -- Returns the actual system path that should be used for IO operations
+-- IMPORTANT: This resolves .. and . to prevent escaping the chroot
 translateToSystemPath :: HasProjectPath project
                       => project  -- ^ Project configuration
                       -> FilePath  -- ^ Virtual CWD inside chroot (e.g., "/subdir")
                       -> FilePath  -- ^ User-provided path (chroot-relative or absolute within chroot)
                       -> FilePath  -- ^ System path
-translateToSystemPath proj virtualCwd userPath
-  | isAbsolute userPath = root </> dropWhile (== '/') userPath  -- Absolute within chroot
-  | otherwise = root </> virtualCwdRelative </> userPath  -- Relative to virtual CWD
-  where
-    root = getProjectPath proj
-    virtualCwdRelative = dropWhile (== '/') virtualCwd
+translateToSystemPath proj virtualCwd userPath =
+  let root = getProjectPath proj
+      virtualCwdRelative = dropWhile (== '/') virtualCwd
+      -- First resolve within the virtual chroot filesystem
+      virtualPath = if isAbsolute userPath
+                    then userPath  -- Absolute within chroot
+                    else "/" </> virtualCwdRelative </> userPath  -- Relative to virtual CWD
+      -- Resolve the virtual path to handle .. and .
+      resolvedVirtual = case Path.resolvePath virtualPath of
+                          Just p -> p
+                          Nothing -> "/"  -- Fallback to root if resolution fails
+      -- Now translate to system path
+      systemPath = root </> dropWhile (== '/') resolvedVirtual
+  in systemPath
 
 -- | Translate a system absolute path back to chroot-relative path
 -- E.g., "/home/user/.local/share/runix-code/generated-tools/Foo.hs" -> "/generated-tools/Foo.hs"
@@ -240,7 +250,11 @@ chrootFileSystem action =
       systemCwd <- getCwd @project
       let root = getProjectPath proj
           relative = makeRelative root systemCwd
-      return $ if relative == "." then "/" else "/" </> relative
+      -- If system CWD is outside the project root, default to chroot root
+      -- This handles tests where process CWD != project directory
+      if isAbsolute relative || ".." `Data.List.isPrefixOf` relative
+        then return "/"  -- CWD is outside project, start at chroot root
+        else return $ if relative == "." then "/" else "/" </> relative
 
     interceptFileSystem :: Members [FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
     interceptFileSystem = intercept $ \case
@@ -252,10 +266,10 @@ chrootFileSystem action =
         proj <- send (GetFileSystem @project)
         virtualCwd <- getVirtualCwd
         let systemPath = translateToSystemPath proj virtualCwd p
-            inputWasAbsolute = isAbsolute p
         result <- send (ListFiles @project systemPath)
-        -- Translate results back, preserving relative/absolute format
-        return $ fmap (map (translateFromSystemPath' proj virtualCwd inputWasAbsolute)) result
+        -- ListFiles returns relative filenames (e.g., "file.txt"), not full paths
+        -- So we don't need to translate them - they're already relative to the directory
+        return result
       FileExists p -> do
         proj <- send (GetFileSystem @project)
         virtualCwd <- getVirtualCwd
@@ -268,10 +282,10 @@ chrootFileSystem action =
         proj <- send (GetFileSystem @project)
         virtualCwd <- getVirtualCwd
         let systemPath = translateToSystemPath proj virtualCwd base
-            inputWasAbsolute = isAbsolute base
         result <- send (Glob @project systemPath pat)
-        -- Translate results back, preserving relative/absolute format
-        return $ fmap (map (translateFromSystemPath' proj virtualCwd inputWasAbsolute)) result
+        -- Glob returns paths relative to the base directory, not full paths
+        -- So we don't need to translate them - they're already relative
+        return result
 
     interceptFileSystemRead :: Members [FileSystemRead project, FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
     interceptFileSystemRead = intercept $ \case
@@ -370,7 +384,7 @@ filterFileSystem filter = intercept $ \case
         let resolved = resolveForCheck cwd p
         if shouldInclude filter resolved
           then send (IsDirectory @project p)
-          else return $ Right False
+          else return $ Left $ "Access denied: " ++ filterName filter
 
   Glob base pat -> do
     cwdResult <- send (GetCwd @project)
@@ -388,8 +402,12 @@ filterFileSystem filter = intercept $ \case
           else return $ Left $ "Access denied: " ++ filterName filter
   where
     resolveForCheck cwd p
-      | isAbsolute p = System.basicResolvePath p
-      | otherwise = System.basicResolvePath (cwd </> p)
+      | isAbsolute p = case Path.resolvePath p of
+                         Just resolved -> resolved
+                         Nothing -> "/"  -- Fallback to root if resolution fails
+      | otherwise = case Path.resolveRelative cwd p of
+                      Just resolved -> resolved
+                      Nothing -> "/"  -- Fallback to root if resolution fails
 
 -- | Apply a filter to filesystem read operations
 -- Resolves all paths to absolute using GetCwd before checking the filter
@@ -406,12 +424,15 @@ filterRead filter = intercept $ \case
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolved = if isAbsolute p
-                      then System.basicResolvePath p
-                      else System.basicResolvePath (cwd </> p)
-        if shouldInclude filter resolved
-          then send (ReadFile @project p)
-          else return $ Left $ "Access denied: " ++ filterName filter
+        let resolvedMaybe = if isAbsolute p
+                            then Path.resolvePath p
+                            else Path.resolveRelative cwd p
+        case resolvedMaybe of
+          Nothing -> return $ Left $ "Invalid path: " ++ p
+          Just resolved ->
+            if shouldInclude filter resolved
+              then send (ReadFile @project p)
+              else return $ Left $ "Access denied: " ++ filterName filter
 
 -- | Apply a filter to filesystem write operations
 -- Resolves all paths to absolute using GetCwd before checking the filter
@@ -428,36 +449,45 @@ filterWrite filter = intercept $ \case
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolved = if isAbsolute p
-                      then System.basicResolvePath p
-                      else System.basicResolvePath (cwd </> p)
-        if shouldInclude filter resolved
-          then send (WriteFile @project p d)
-          else return $ Left $ "Access denied: " ++ filterName filter
+        let resolvedMaybe = if isAbsolute p
+                            then Path.resolvePath p
+                            else Path.resolveRelative cwd p
+        case resolvedMaybe of
+          Nothing -> return $ Left $ "Invalid path: " ++ p
+          Just resolved ->
+            if shouldInclude filter resolved
+              then send (WriteFile @project p d)
+              else return $ Left $ "Access denied: " ++ filterName filter
 
   CreateDirectory createParents p -> do
     cwdResult <- send (GetCwd @project)
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolved = if isAbsolute p
-                      then System.basicResolvePath p
-                      else System.basicResolvePath (cwd </> p)
-        if shouldInclude filter resolved
-          then send (CreateDirectory @project createParents p)
-          else return $ Left $ "Access denied: " ++ filterName filter
+        let resolvedMaybe = if isAbsolute p
+                            then Path.resolvePath p
+                            else Path.resolveRelative cwd p
+        case resolvedMaybe of
+          Nothing -> return $ Left $ "Invalid path: " ++ p
+          Just resolved ->
+            if shouldInclude filter resolved
+              then send (CreateDirectory @project createParents p)
+              else return $ Left $ "Access denied: " ++ filterName filter
 
   Remove recursive p -> do
     cwdResult <- send (GetCwd @project)
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolved = if isAbsolute p
-                      then System.basicResolvePath p
-                      else System.basicResolvePath (cwd </> p)
-        if shouldInclude filter resolved
-          then send (Remove @project recursive p)
-          else return $ Left $ "Access denied: " ++ filterName filter
+        let resolvedMaybe = if isAbsolute p
+                            then Path.resolvePath p
+                            else Path.resolveRelative cwd p
+        case resolvedMaybe of
+          Nothing -> return $ Left $ "Invalid path: " ++ p
+          Just resolved ->
+            if shouldInclude filter resolved
+              then send (Remove @project recursive p)
+              else return $ Left $ "Access denied: " ++ filterName filter
 
 --------------------------------------------------------------------------------
 -- Common Filters
@@ -508,14 +538,14 @@ limitToSubpath :: FilePath  -- ^ Allowed base path (should be absolute)
                -> PathFilter
 limitToSubpath allowedPath = PathFilter
   { shouldInclude = \p ->
-      let normalizedAllowed = addTrailingPathSeparator $ System.basicResolvePath allowedPath
-          -- Path is already resolved to absolute by filterFileSystem
-          normalizedTarget = addTrailingPathSeparator $ System.basicResolvePath p
-      in splitPath normalizedAllowed `isPrefixOf` splitPath normalizedTarget
+      -- Both paths should be absolute at this point
+      -- Use the new path resolution logic that properly walks the path
+      case (Path.resolvePath allowedPath, Path.resolvePath p) of
+        (Just resolvedAllowed, Just resolvedTarget) ->
+          Path.isWithinDirectory resolvedAllowed resolvedTarget
+        _ -> False  -- If either path can't be resolved, deny access
   , filterName = "path is outside allowed directory " ++ allowedPath
   }
-  where
-    isPrefixOf = Data.List.isPrefixOf
 
 --------------------------------------------------------------------------------
 -- Logging Wrappers

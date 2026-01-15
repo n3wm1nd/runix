@@ -106,6 +106,10 @@ grepForFilesystem = interpret $ \case
         info $ fromString "grep search: " <> fromString pattern <> fromString " in " <> fromString basePath
              <> fromString " (system path: " <> fromString systemBasePath <> fromString ")"
 
+        -- Check if base path is accessible (triggers filter check)
+        -- If the filter blocks access, this will fail
+        _ <- FS.isDirectory @project basePath
+
         -- Run ripgrep with system path
         result <- cmdsExec "rg" ["--line-number", "--with-filename", "--", pattern, systemBasePath]
         let allMatches = case CmdE.exitCode result of
