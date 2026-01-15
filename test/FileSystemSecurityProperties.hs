@@ -11,23 +11,18 @@ module FileSystemSecurityProperties (spec) where
 
 import Test.Hspec
 import Test.QuickCheck
-import Test.QuickCheck.Monadic hiding (run)
 import Polysemy
 import Polysemy.Error
-import Polysemy.Fail (Fail, failToError)
-import qualified Data.ByteString as BS
+import Polysemy.Fail (failToError)
 import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
-import System.FilePath (normalise, isAbsolute, (</>) , splitPath, addTrailingPathSeparator,
+import System.FilePath (isAbsolute, (</>) , splitPath, addTrailingPathSeparator,
                         splitDirectories, joinPath, takeDirectory, dropTrailingPathSeparator)
 import Prelude hiding (readFile)
-import Data.List (isPrefixOf, stripPrefix)
-import Data.Maybe (isJust, fromMaybe)
-import Control.Monad (forM_)
+import Data.List (isPrefixOf)
+import Data.Maybe (fromMaybe)
 
 import Runix.FileSystem
-import qualified Runix.FileSystem.System as System
-import Runix.FileSystem.InMemory (InMemoryFS, filesystemInMemory)
+import Runix.FileSystem.InMemory (filesystemInMemory)
 
 --------------------------------------------------------------------------------
 -- Test Project Type
