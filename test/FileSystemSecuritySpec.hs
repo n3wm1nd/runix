@@ -712,6 +712,95 @@ spec = do
         Left err -> "Access denied" `isInfixOf` err
         Right _ -> False
 
+  describe "Chroot Glob Operations" $ do
+    it "glob with relative base path returns chroot-relative results" $ do
+      let fs = Map.fromList
+            [ ("/project/file1.txt", "content1")
+            , ("/project/file2.txt", "content2")
+            , ("/project/subdir/nested.txt", "nested")
+            ]
+          -- In chroot, CWD is "/", glob "." should return relative paths
+          result = runFSWithChroot "/project" fs $ glob @SecurityTest "." "*.txt"
+
+      -- Should return chroot-relative paths, not system paths
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
+
+    it "glob with absolute chroot path works correctly" $ do
+      let fs = Map.fromList
+            [ ("/project/generated-tools/Tool1.hs", "module Tool1")
+            , ("/project/generated-tools/Tool2.hs", "module Tool2")
+            , ("/project/src/Main.hs", "main")
+            ]
+          -- In chroot, "/generated-tools" is an absolute path within the chroot
+          result = runFSWithChroot "/project" fs $ glob @SecurityTest "/generated-tools" "*.hs"
+
+      -- Should return paths relative to the base directory
+      result `shouldBe` Right ["Tool1.hs", "Tool2.hs"]
+
+    it "glob results can be used to read files without double-prefixing" $ do
+      let fs = Map.fromList
+            [ ("/project/generated-tools/Tool1.hs", "module Tool1")
+            , ("/project/generated-tools/Tool2.hs", "module Tool2")
+            ]
+          program = do
+            files <- glob @SecurityTest "/generated-tools" "*.hs"
+            -- Use the first result to read the file
+            case files of
+              [] -> return "no files found"
+              (f:_) -> do
+                -- Construct path relative to base
+                let fullPath = "/generated-tools" </> f
+                readFile @SecurityTest fullPath
+          result = runFSWithChroot "/project" fs program
+
+      -- Should successfully read the file content
+      result `shouldBe` Right "module Tool1"
+
+    it "glob with nested absolute chroot path" $ do
+      let fs = Map.fromList
+            [ ("/project/a/b/c/file1.txt", "content1")
+            , ("/project/a/b/c/file2.txt", "content2")
+            , ("/project/a/b/other.txt", "other")
+            ]
+          -- Absolute chroot path "/a/b/c"
+          result = runFSWithChroot "/project" fs $ glob @SecurityTest "/a/b/c" "*.txt"
+
+      result `shouldBe` Right ["file1.txt", "file2.txt"]
+
+    it "glob with pattern containing absolute path components" $ do
+      -- This tests the specific bug: pattern itself contains absolute path
+      let fs = Map.fromList
+            [ ("/project/generated-tools/subdir/Tool1.hs", "module Tool1")
+            , ("/project/generated-tools/subdir/Tool2.hs", "module Tool2")
+            , ("/project/other/File.hs", "other")
+            ]
+          -- Pattern "/generated-tools/**/*.hs" contains an absolute chroot path
+          result = runFSWithChroot "/project" fs $ glob @SecurityTest "/" "generated-tools/**/*.hs"
+
+      -- Should find files matching the pattern
+      result `shouldSatisfy` \case
+        Right files -> "generated-tools/subdir/Tool1.hs" `elem` files && "generated-tools/subdir/Tool2.hs" `elem` files
+        Left _ -> False
+
+    it "getCwd in chroot returns chroot-relative path" $ do
+      let fs = Map.empty
+          result = runFSWithChroot "/project" fs $ getCwd @SecurityTest
+
+      -- In chroot, CWD should be "/" not "/project"
+      result `shouldBe` Right "/"
+
+    it "glob results are relative to base, not absolute system paths" $ do
+      let fs = Map.fromList
+            [ ("/project/tools/Tool1.hs", "module Tool1")
+            , ("/project/tools/Tool2.hs", "module Tool2")
+            ]
+          result = runFSWithChroot "/project" fs $ glob @SecurityTest "/tools" "*.hs"
+
+      -- Results should NOT contain system path "/project/"
+      result `shouldSatisfy` \case
+        Right files -> all (\f -> not ("/project/" `isPrefixOf` f)) files
+        Left _ -> False
+
   describe "onlyClaude Filter" $ do
     it "onlyClaude filter allows .claude directory paths" $ do
       let filter = onlyClaude

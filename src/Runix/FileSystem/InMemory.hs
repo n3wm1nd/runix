@@ -69,36 +69,21 @@ filesystemReadInMemory cwd fs = interpret $ \case
 
     Glob base pat -> do
         let basePath = resolveAbsolutePath cwd base
-
-            -- Determine the search directory
-            (searchDir, searchPattern) =
-              if isAbsolute pat
-              then
-                -- Absolute pattern: extract directory and pattern parts
-                let dir = takeDirectory pat
-                    patName = takeFileName pat
-                in (dir, patName)
-              else
-                -- Relative pattern: navigate from base according to pattern
-                let patDir = takeDirectory pat
-                    patName = takeFileName pat
-                    resolvedDir = basicResolvePath (basePath </> patDir)
-                in (resolvedDir, patName)
-
-            -- Get all files in filesystem
             allFiles = Map.keys fs
 
-            -- Compile the final search pattern
-            finalPattern = Glob.compile searchPattern
+            -- Compile the glob pattern - handles **, *, ?, etc.
+            compiledPattern = Glob.compile pat
 
-            -- Find files under searchDir that match the pattern name
-            matchedAbsolute = filter (\f ->
-              let dir = takeDirectory f
-                  name = takeFileName f
-              in dir == searchDir && Glob.match finalPattern name) allFiles
+            -- For each file, check if it matches when made relative to basePath
+            matchedFiles = filter (\absPath ->
+              -- Get the path relative to basePath
+              let relPath = makeRelativeTo basePath absPath
+              -- Check if this relative path matches the pattern
+              in Glob.match compiledPattern relPath
+              ) allFiles
 
-            -- Convert to paths relative to base
-            matchedRelative = map (makeRelativeTo basePath) matchedAbsolute
+            -- Convert matched files to paths relative to base
+            matchedRelative = map (makeRelativeTo basePath) matchedFiles
 
         return $ Right $ sort matchedRelative
       where
@@ -172,21 +157,22 @@ filesystemInMemory cwd fs proj =
       Param.IsDirectory _p -> return $ Right False
       Param.Glob base pat -> do
         let basePath = resolvePath base
-            (searchDir, searchPattern) =
-              if isAbsolute pat
-              then (takeDirectory pat, takeFileName pat)
-              else
-                let patDir = takeDirectory pat
-                    patName = takeFileName pat
-                    resolvedDir = basicResolvePath (basePath </> patDir)
-                in (resolvedDir, patName)
             allFiles = Map.keys fs
-            finalPattern = Glob.compile searchPattern
-            matchedAbsolute = filter (\f ->
-              let dir = takeDirectory f
-                  name = takeFileName f
-              in dir == searchDir && Glob.match finalPattern name) allFiles
-            matchedRelative = map (makeRelativeTo basePath) matchedAbsolute
+
+            -- Compile the glob pattern - handles **, *, ?, etc.
+            compiledPattern = Glob.compile pat
+
+            -- For each file, check if it matches when made relative to basePath
+            matchedFiles = filter (\absPath ->
+              -- Get the path relative to basePath
+              let relPath = makeRelativeTo basePath absPath
+              -- Check if this relative path matches the pattern
+              in Glob.match compiledPattern relPath
+              ) allFiles
+
+            -- Convert matched files to paths relative to base
+            matchedRelative = map (makeRelativeTo basePath) matchedFiles
+
         return $ Right $ sort matchedRelative
       where
         makeRelativeTo :: FilePath -> FilePath -> FilePath
@@ -203,7 +189,7 @@ filesystemInMemory cwd fs proj =
     interpretFileSystemRead = interpret $ \case
       Param.ReadFile p -> return $ case Map.lookup (resolvePath p) fs of
         Just content -> Right content
-        Nothing -> Left $ "File not found: " ++ show (resolvePath p)
+        Nothing -> Left $ "File not found: input=" ++ show p ++ ", resolved=" ++ show (resolvePath p)
 
     interpretFileSystemWrite :: Sem (Param.FileSystemWrite project : r') x -> Sem r' x
     interpretFileSystemWrite = interpret $ \case

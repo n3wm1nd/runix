@@ -154,11 +154,9 @@ translateToSystemPath proj virtualCwd userPath =
                     then userPath  -- Absolute within chroot
                     else "/" </> virtualCwdRelative </> userPath  -- Relative to virtual CWD
       -- Resolve the virtual path to handle .. and .
-      resolvedVirtual = case Path.resolvePath virtualPath of
-                          Just p -> p
-                          Nothing -> "/"  -- Fallback to root if resolution fails
+      resolvedVirtual = Path.resolvePath virtualPath
       -- Now translate to system path
-      systemPath = root </> dropWhile (== '/') resolvedVirtual
+      systemPath = root </> resolvedVirtual
   in systemPath
 
 -- | Translate a system absolute path back to chroot-relative path
@@ -232,82 +230,133 @@ fileSystemFromSystem project action =
       CreateDirectory createParents p -> send (System.CreateDirectory createParents p)
       Remove recursive p -> send (System.Remove recursive p)
 
+--------------------------------------------------------------------------------
+-- Chroot Translation Utilities
+--------------------------------------------------------------------------------
+
+-- | Compute the chroot CWD from parent CWD
+-- If parent CWD is inside chroot: return relative path from chroot root
+-- If parent CWD is outside chroot: return "/"
+computeChrootCwd :: FilePath -> FilePath -> FilePath
+computeChrootCwd chrootRoot parentCwd =
+  let relative = makeRelative chrootRoot parentCwd
+      isOutside = isAbsolute relative || ".." `Data.List.isPrefixOf` relative
+  in if isOutside
+     then "/"
+     else if relative == "."
+          then "/"
+          else "/" </> relative
+
+-- | Make a proper relative path from source to target, even when they don't share a prefix
+-- Uses recursive algorithm: if not common root, strip one element from "from", add one "..", recurse
+makeProperRelativePath :: FilePath -> FilePath -> FilePath
+makeProperRelativePath from to = go from []
+  where
+    go currentFrom ups
+      | isPrefixOfPath currentFrom to =
+          -- Found common root, build the path back
+          let remaining = makeRelative currentFrom to
+              upsPath = case ups of
+                          [] -> ""
+                          [up] -> up
+                          _ -> foldr1 (</>) ups
+          in case (null ups, remaining) of
+               (True, _) -> remaining  -- No ups needed
+               (False, ".") -> upsPath  -- Only ups, no remaining
+               (False, _) -> upsPath </> remaining  -- Both ups and remaining
+      | otherwise =
+          -- Not a prefix yet, go up one level in "from"
+          let parent = takeDirectory currentFrom
+          in if parent == currentFrom  -- Hit root, can't go higher
+             then error "Impossible: paths should share / at minimum"
+             else go parent (".." : ups)
+
+-- | Check if one path is a prefix of another (both should be absolute)
+isPrefixOfPath :: FilePath -> FilePath -> Bool
+isPrefixOfPath prefix path =
+  let cleanPart p = filter (/= '/') p  -- Remove all slashes
+      prefixParts = filter (not . null) $ map cleanPart $ splitPath prefix
+      pathParts = filter (not . null) $ map cleanPart $ splitPath path
+  in prefixParts `Data.List.isPrefixOf` pathParts
+
+-- | Translate a chroot-relative path to parent filesystem coordinates
+-- Preserves relative/absolute nature of the input
+translateChrootToParent :: FilePath   -- ^ Chroot root (absolute)
+                        -> FilePath   -- ^ Parent CWD (absolute)
+                        -> FilePath   -- ^ Chroot path (relative or absolute within chroot)
+                        -> FilePath   -- ^ Parent path
+translateChrootToParent chrootRoot parentCwd chrootPath =
+  let chrootCwd = computeChrootCwd chrootRoot parentCwd
+      isInputAbsolute = isAbsolute chrootPath
+
+      -- Make chrootPath absolute in chroot coordinates
+      chrootAbsolute = if isInputAbsolute
+                       then chrootPath
+                       else chrootCwd </> chrootPath
+
+      -- Sanitize within chroot (resolve .. and ., prevent escape)
+      sanitized = Path.resolvePath chrootAbsolute
+
+      -- Convert to parent coordinates
+      parentAbsolute = chrootRoot </> dropWhile (== '/') sanitized
+
+  in if isInputAbsolute
+     then parentAbsolute  -- Absolute in, absolute out
+     else makeProperRelativePath parentCwd parentAbsolute  -- Relative in, relative out
+
 -- | Chroot a filesystem to a subdirectory
--- Translates absolute paths and GetCwd to chroot coordinates
+-- Translates paths between chroot coordinates (/) and system coordinates (project root)
+-- by walking paths component-by-component, preserving relative/absolute distinction
 chrootFileSystem :: forall project r a.
                     ( HasProjectPath project
                     , Members [FileSystemRead project, FileSystemWrite project, FileSystem project, Fail] r
                     )
                  => Sem r a
                  -> Sem r a
-chrootFileSystem action =
-  interceptFileSystem . interceptFileSystemRead . interceptFileSystemWrite $ action
-  where
-    -- Helper to get virtual CWD from system CWD
-    getVirtualCwd :: Members [FileSystem project, Fail] r' => Sem r' FilePath
-    getVirtualCwd = do
-      proj <- send (GetFileSystem @project)
-      systemCwd <- getCwd @project
-      let root = getProjectPath proj
-          relative = makeRelative root systemCwd
-      -- If system CWD is outside the project root, default to chroot root
-      -- This handles tests where process CWD != project directory
-      if isAbsolute relative || ".." `Data.List.isPrefixOf` relative
-        then return "/"  -- CWD is outside project, start at chroot root
-        else return $ if relative == "." then "/" else "/" </> relative
+chrootFileSystem action = do
+  -- Get project configuration and parent CWD BEFORE setting up interceptors
+  -- This ensures we don't call GetCwd through our own interceptors
+  proj <- send (GetFileSystem @project)
+  parentCwdResult <- send (GetCwd @project)
+  parentCwd <- case parentCwdResult of
+    Left err -> fail err
+    Right cwd -> return cwd
+  let chrootRoot = getProjectPath proj
 
-    interceptFileSystem :: Members [FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
-    interceptFileSystem = intercept $ \case
+  -- Now set up interceptors with the captured values
+  interceptFileSystem chrootRoot parentCwd
+    . interceptFileSystemRead chrootRoot parentCwd
+    . interceptFileSystemWrite chrootRoot parentCwd
+    $ action
+  where
+    -- Translate chroot path to parent path using captured chrootRoot and parentCwd
+    fromChroot :: FilePath -> FilePath -> FilePath -> FilePath
+    fromChroot chrootRoot parentCwd chrootPath =
+      translateChrootToParent chrootRoot parentCwd chrootPath
+
+    interceptFileSystem :: Member (FileSystem project) r' => FilePath -> FilePath -> Sem r' a' -> Sem r' a'
+    interceptFileSystem chrootRoot parentCwd = intercept $ \case
       GetFileSystem -> send (GetFileSystem @project)
       GetCwd -> do
-        virtualCwd <- getVirtualCwd
-        return $ Right virtualCwd
-      ListFiles p -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        let systemPath = translateToSystemPath proj virtualCwd p
-        result <- send (ListFiles @project systemPath)
-        -- ListFiles returns relative filenames (e.g., "file.txt"), not full paths
-        -- So we don't need to translate them - they're already relative to the directory
-        return result
-      FileExists p -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        send (FileExists @project (translateToSystemPath proj virtualCwd p))
-      IsDirectory p -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        send (IsDirectory @project (translateToSystemPath proj virtualCwd p))
+        let chrootCwd = computeChrootCwd chrootRoot parentCwd
+        return $ Right chrootCwd
+      ListFiles p -> send (ListFiles @project (fromChroot chrootRoot parentCwd p))
+      FileExists p -> send (FileExists @project (fromChroot chrootRoot parentCwd p))
+      IsDirectory p -> send (IsDirectory @project (fromChroot chrootRoot parentCwd p))
       Glob base pat -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        let systemPath = translateToSystemPath proj virtualCwd base
-        result <- send (Glob @project systemPath pat)
-        -- Glob returns paths relative to the base directory, not full paths
-        -- So we don't need to translate them - they're already relative
-        return result
+        -- Translate base to parent coordinates, pattern unchanged
+        let sysBase = fromChroot chrootRoot parentCwd base
+        send (Glob @project sysBase pat)
 
-    interceptFileSystemRead :: Members [FileSystemRead project, FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
-    interceptFileSystemRead = intercept $ \case
-      ReadFile p -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        send (ReadFile @project (translateToSystemPath proj virtualCwd p))
+    interceptFileSystemRead :: Member (FileSystemRead project) r' => FilePath -> FilePath -> Sem r' a' -> Sem r' a'
+    interceptFileSystemRead chrootRoot parentCwd = intercept $ \case
+      ReadFile p -> send (ReadFile @project (fromChroot chrootRoot parentCwd p))
 
-    interceptFileSystemWrite :: Members [FileSystemWrite project, FileSystem project, Fail] r' => Sem r' a' -> Sem r' a'
-    interceptFileSystemWrite = intercept $ \case
-      WriteFile p d -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        send (WriteFile @project (translateToSystemPath proj virtualCwd p) d)
-      CreateDirectory createParents p -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        send (CreateDirectory @project createParents (translateToSystemPath proj virtualCwd p))
-      Remove recursive p -> do
-        proj <- send (GetFileSystem @project)
-        virtualCwd <- getVirtualCwd
-        send (Remove @project recursive (translateToSystemPath proj virtualCwd p))
+    interceptFileSystemWrite :: Member (FileSystemWrite project) r' => FilePath -> FilePath -> Sem r' a' -> Sem r' a'
+    interceptFileSystemWrite chrootRoot parentCwd = intercept $ \case
+      WriteFile p d -> send (WriteFile @project (fromChroot chrootRoot parentCwd p) d)
+      CreateDirectory createParents p -> send (CreateDirectory @project createParents (fromChroot chrootRoot parentCwd p))
+      Remove recursive p -> send (Remove @project recursive (fromChroot chrootRoot parentCwd p))
 
 -- | Interpret filesystem effects for a local directory (with chroot)
 -- All paths are relative to the project root
@@ -402,12 +451,8 @@ filterFileSystem filter = intercept $ \case
           else return $ Left $ "Access denied: " ++ filterName filter
   where
     resolveForCheck cwd p
-      | isAbsolute p = case Path.resolvePath p of
-                         Just resolved -> resolved
-                         Nothing -> "/"  -- Fallback to root if resolution fails
-      | otherwise = case Path.resolveRelative cwd p of
-                      Just resolved -> resolved
-                      Nothing -> "/"  -- Fallback to root if resolution fails
+      | isAbsolute p = Path.resolvePath p
+      | otherwise = Path.resolveRelative cwd p
 
 -- | Apply a filter to filesystem read operations
 -- Resolves all paths to absolute using GetCwd before checking the filter
@@ -424,15 +469,12 @@ filterRead filter = intercept $ \case
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolvedMaybe = if isAbsolute p
-                            then Path.resolvePath p
-                            else Path.resolveRelative cwd p
-        case resolvedMaybe of
-          Nothing -> return $ Left $ "Invalid path: " ++ p
-          Just resolved ->
-            if shouldInclude filter resolved
-              then send (ReadFile @project p)
-              else return $ Left $ "Access denied: " ++ filterName filter
+        let resolved = if isAbsolute p
+                       then Path.resolvePath p
+                       else Path.resolveRelative cwd p
+        if shouldInclude filter resolved
+          then send (ReadFile @project p)
+          else return $ Left $ "Access denied: " ++ filterName filter
 
 -- | Apply a filter to filesystem write operations
 -- Resolves all paths to absolute using GetCwd before checking the filter
@@ -449,45 +491,36 @@ filterWrite filter = intercept $ \case
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolvedMaybe = if isAbsolute p
-                            then Path.resolvePath p
-                            else Path.resolveRelative cwd p
-        case resolvedMaybe of
-          Nothing -> return $ Left $ "Invalid path: " ++ p
-          Just resolved ->
-            if shouldInclude filter resolved
-              then send (WriteFile @project p d)
-              else return $ Left $ "Access denied: " ++ filterName filter
+        let resolved = if isAbsolute p
+                       then Path.resolvePath p
+                       else Path.resolveRelative cwd p
+        if shouldInclude filter resolved
+          then send (WriteFile @project p d)
+          else return $ Left $ "Access denied: " ++ filterName filter
 
   CreateDirectory createParents p -> do
     cwdResult <- send (GetCwd @project)
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolvedMaybe = if isAbsolute p
-                            then Path.resolvePath p
-                            else Path.resolveRelative cwd p
-        case resolvedMaybe of
-          Nothing -> return $ Left $ "Invalid path: " ++ p
-          Just resolved ->
-            if shouldInclude filter resolved
-              then send (CreateDirectory @project createParents p)
-              else return $ Left $ "Access denied: " ++ filterName filter
+        let resolved = if isAbsolute p
+                       then Path.resolvePath p
+                       else Path.resolveRelative cwd p
+        if shouldInclude filter resolved
+          then send (CreateDirectory @project createParents p)
+          else return $ Left $ "Access denied: " ++ filterName filter
 
   Remove recursive p -> do
     cwdResult <- send (GetCwd @project)
     case cwdResult of
       Left err -> return $ Left err
       Right cwd -> do
-        let resolvedMaybe = if isAbsolute p
-                            then Path.resolvePath p
-                            else Path.resolveRelative cwd p
-        case resolvedMaybe of
-          Nothing -> return $ Left $ "Invalid path: " ++ p
-          Just resolved ->
-            if shouldInclude filter resolved
-              then send (Remove @project recursive p)
-              else return $ Left $ "Access denied: " ++ filterName filter
+        let resolved = if isAbsolute p
+                       then Path.resolvePath p
+                       else Path.resolveRelative cwd p
+        if shouldInclude filter resolved
+          then send (Remove @project recursive p)
+          else return $ Left $ "Access denied: " ++ filterName filter
 
 --------------------------------------------------------------------------------
 -- Common Filters
@@ -540,10 +573,9 @@ limitToSubpath allowedPath = PathFilter
   { shouldInclude = \p ->
       -- Both paths should be absolute at this point
       -- Use the new path resolution logic that properly walks the path
-      case (Path.resolvePath allowedPath, Path.resolvePath p) of
-        (Just resolvedAllowed, Just resolvedTarget) ->
-          Path.isWithinDirectory resolvedAllowed resolvedTarget
-        _ -> False  -- If either path can't be resolved, deny access
+      let resolvedAllowed = Path.resolvePath allowedPath
+          resolvedTarget = Path.resolvePath p
+      in Path.isWithinDirectory resolvedAllowed resolvedTarget
   , filterName = "path is outside allowed directory " ++ allowedPath
   }
 

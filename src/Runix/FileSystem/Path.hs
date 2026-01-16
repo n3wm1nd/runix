@@ -24,7 +24,6 @@ import System.FilePath
   , takeDirectory
   , dropTrailingPathSeparator
   , splitDirectories
-  , joinPath
   , (</>)
   )
 import Data.List (isPrefixOf)
@@ -34,37 +33,35 @@ import Data.List (isPrefixOf)
 --------------------------------------------------------------------------------
 
 -- | Resolve a path by walking through components
--- This handles .. and . properly, and prevents escaping root
--- Returns Nothing if the path tries to escape root
+-- This handles .. and . properly, clamping at root (.. at / stays at /)
 --
 -- Examples:
 -- >>> resolvePath "/foo/bar/../baz"
--- Just "/foo/baz"
+-- "/foo/baz"
 -- >>> resolvePath "/.."
--- Just "/"
+-- "/"
 -- >>> resolvePath "/foo//bar"
--- Just "/foo/bar"
-resolvePath :: FilePath -> Maybe FilePath
+-- "/foo/bar"
+resolvePath :: FilePath -> FilePath
 resolvePath path = resolveFromRoot "/" path
 
 -- | Resolve a path from a given base directory
 -- Both base and path should be absolute (or path can be relative)
--- Returns Nothing if resolution would escape root
 --
 -- Examples:
 -- >>> resolveFromRoot "/project" "/file.txt"
--- Just "/file.txt"
+-- "/file.txt"
 -- >>> resolveFromRoot "/project" "subdir/file.txt"
--- Just "/project/subdir/file.txt"
-resolveFromRoot :: FilePath -> FilePath -> Maybe FilePath
+-- "/project/subdir/file.txt"
+resolveFromRoot :: FilePath -> FilePath -> FilePath
 resolveFromRoot base path
   | not (isAbsolute base) = error "resolveFromRoot: base must be absolute"
   | isAbsolute path = walkPath "/" (splitDirectories $ dropWhile (== '/') path)
   | otherwise = walkPath base (splitDirectories path)
   where
     -- Walk through path components, maintaining current position
-    walkPath :: FilePath -> [String] -> Maybe FilePath
-    walkPath current [] = Just $ normalizeResult current
+    walkPath :: FilePath -> [String] -> FilePath
+    walkPath current [] = normalizeResult current
     walkPath current (comp:rest)
       | comp == "." || comp == "" = walkPath current rest
       | comp == ".." =
@@ -81,16 +78,15 @@ resolveFromRoot base path
       | otherwise = "/" ++ dropWhile (== '/') (dropTrailingPathSeparator p)
 
 -- | Resolve a relative path from a working directory
--- Returns Nothing if resolution would escape root
 --
 -- Examples:
 -- >>> resolveRelative "/project" "subdir/file.txt"
--- Just "/project/subdir/file.txt"
+-- "/project/subdir/file.txt"
 -- >>> resolveRelative "/project" "../etc/passwd"
--- Just "/etc/passwd"
+-- "/etc/passwd"
 -- >>> resolveRelative "/project" "../../.."
--- Just "/"
-resolveRelative :: FilePath -> FilePath -> Maybe FilePath
+-- "/"
+resolveRelative :: FilePath -> FilePath -> FilePath
 resolveRelative cwd relPath
   | not (isAbsolute cwd) = error "resolveRelative: cwd must be absolute"
   | isAbsolute relPath = resolvePath relPath
@@ -138,13 +134,10 @@ isPathAllowed :: FilePath   -- ^ Allowed directory (absolute)
               -> FilePath   -- ^ Target path (absolute or relative)
               -> Bool
 isPathAllowed allowedDir cwd targetPath =
-  case resolvedPath of
-    Nothing -> False  -- Path tried to escape root or is invalid
-    Just resolved -> isWithinDirectory allowedDir resolved
-  where
-    resolvedPath = if isAbsolute targetPath
-                   then resolvePath targetPath
-                   else resolveRelative cwd targetPath
+  let resolved = if isAbsolute targetPath
+                 then resolvePath targetPath
+                 else resolveRelative cwd targetPath
+  in isWithinDirectory allowedDir resolved
 
 --------------------------------------------------------------------------------
 -- Utilities
@@ -160,8 +153,6 @@ isPathAllowed allowedDir cwd targetPath =
 -- 3. Returns it in normalized form
 normalizePathForCheck :: FilePath -> FilePath -> FilePath
 normalizePathForCheck cwd path =
-  case if isAbsolute path
-       then resolvePath path
-       else resolveRelative cwd path of
-    Nothing -> "/"  -- Fallback to root if resolution fails
-    Just resolved -> resolved
+  if isAbsolute path
+  then resolvePath path
+  else resolveRelative cwd path
