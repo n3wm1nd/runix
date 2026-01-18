@@ -353,6 +353,44 @@ spec = do
           path = "../baz"
       Path.resolveRelative cwd path `shouldBe` "/foo/baz"
 
+  describe "Path Translation for External Tools (grep, etc.)" $ do
+    it "translateToSystemPath with relative path from chroot root" $ do
+      let proj = TestProject "/home/user/project"
+          virtualCwd = "/"
+          userPath = "config.yaml"
+          result = translateToSystemPath proj virtualCwd userPath
+      result `shouldBe` "/home/user/project/config.yaml"
+
+    it "translateToSystemPath with absolute chroot path" $ do
+      let proj = TestProject "/home/user/project"
+          virtualCwd = "/"
+          userPath = "/config/app.yaml"
+          result = translateToSystemPath proj virtualCwd userPath
+      result `shouldBe` "/home/user/project/config/app.yaml"
+
+    it "translateToSystemPath with . should give chroot root" $ do
+      let proj = TestProject "/home/user/project"
+          virtualCwd = "/"
+          userPath = "."
+          result = translateToSystemPath proj virtualCwd userPath
+      -- CRITICAL: This should be the chroot root, NOT the system root!
+      result `shouldBe` "/home/user/project"
+
+    it "translateToSystemPath with relative path from nested virtualCwd" $ do
+      let proj = TestProject "/home/user/project"
+          virtualCwd = "/subdir"
+          userPath = "file.txt"
+          result = translateToSystemPath proj virtualCwd userPath
+      result `shouldBe` "/home/user/project/subdir/file.txt"
+
+    it "translateToSystemPath prevents chroot escape" $ do
+      let proj = TestProject "/home/user/project"
+          virtualCwd = "/"
+          userPath = "/../../../etc/passwd"
+          result = translateToSystemPath proj virtualCwd userPath
+      -- Should be sanitized to /etc/passwd inside chroot, not system /etc/passwd
+      result `shouldBe` "/home/user/project/etc/passwd"
+
   describe "Integration Tests - Full Effect Stack" $ do
     describe "chrootFileSystem with InMemory backend" $ do
       it "debug: translateChrootToParent with our exact scenario" $ do
@@ -495,6 +533,51 @@ spec = do
               ]
             result = runChrootTest "/project" fs $ glob @TestProject "." "*.txt"
         result `shouldBe` Right ["file1.txt", "file2.txt"]
+
+      it "glob with absolute pattern in chroot coordinates" $ do
+        let fs = Map.fromList
+              [ ("/home/user/project/config/app.yaml", "app")
+              , ("/home/user/project/config/db.yaml", "db")
+              , ("/home/user/project/src/main.hs", "main")
+              , ("/home/user/config/system.yaml", "system")  -- outside chroot
+              ]
+            -- In chroot, /config/*.yaml means /home/user/project/config/*.yaml in parent
+            -- Absolute pattern should return absolute results in chroot coordinates
+            result = runChrootTest "/home/user/project" fs $ glob @TestProject "." "/config/*.yaml"
+        result `shouldBe` Right ["/config/app.yaml", "/config/db.yaml"]
+
+      it "glob with absolute pattern prevents chroot escape" $ do
+        let fs = Map.fromList
+              [ ("/home/user/project/file.txt", "inside")
+              , ("/home/user/config/secret.conf", "outside")
+              , ("/etc/passwd", "system")
+              ]
+            -- Try to escape with /../../../etc/*, should be sanitized to /etc/*
+            -- which is still inside chroot: /home/user/project/etc/*
+            result = runChrootTest "/home/user/project" fs $ glob @TestProject "." "/../../../etc/*"
+        -- Pattern /../../../etc/* gets sanitized to /etc/* (can't escape above root)
+        -- So it looks for /home/user/project/etc/* which doesn't exist
+        result `shouldBe` Right []
+
+      it "glob with deep nested pattern returns chroot-relative paths (no system path leak)" $ do
+        let fs = Map.fromList
+              [ ("/home/user/project/generated-tools/Foo.hs", "foo")
+              , ("/home/user/project/generated-tools/Bar.hs", "bar")
+              , ("/home/user/project/generated-tools/subdir/Baz.hs", "baz")
+              ]
+            -- Pattern: /generated-tools/**/*.hs (absolute in chroot coordinates)
+            -- Should return paths like /generated-tools/Foo.hs, NOT /home/user/project/generated-tools/Foo.hs
+            result = runChrootTest "/home/user/project" fs $ glob @TestProject "." "/generated-tools/**/*.hs"
+        case result of
+          Right paths -> do
+            -- All paths should start with / (absolute in chroot)
+            all (\p -> take 1 p == "/") paths `shouldBe` True
+            -- No path should contain the system prefix "/home/user/project"
+            any (\p -> "/home/user/project" `isPrefixOf` p) paths `shouldBe` False
+            -- Should contain the expected files
+            "/generated-tools/Foo.hs" `elem` paths `shouldBe` True
+            "/generated-tools/Bar.hs" `elem` paths `shouldBe` True
+          Left err -> expectationFailure $ "glob failed: " ++ err
 
       it "listFiles returns chroot-relative paths" $ do
         let fs = Map.fromList

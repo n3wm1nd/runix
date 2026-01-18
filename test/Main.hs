@@ -159,8 +159,7 @@ main = do
 
     describe "FileSystem Project Effects" FileSystemProjectSpec.spec
 
-    -- DISABLED: Grep tests scan entire filesystem
-    -- describe "Grep Security" GrepSecuritySpec.spec
+    describe "Grep Security" GrepSecuritySpec.spec
 
     describe "SSE Parser Unit Tests" SSEParserSpec.spec
 

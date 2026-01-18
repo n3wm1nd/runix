@@ -155,8 +155,10 @@ translateToSystemPath proj virtualCwd userPath =
                     else "/" </> virtualCwdRelative </> userPath  -- Relative to virtual CWD
       -- Resolve the virtual path to handle .. and .
       resolvedVirtual = Path.resolvePath virtualPath
+      -- Strip leading / before joining with root (otherwise </> ignores root)
+      resolvedVirtualRelative = dropWhile (== '/') resolvedVirtual
       -- Now translate to system path
-      systemPath = root </> resolvedVirtual
+      systemPath = root </> resolvedVirtualRelative
   in systemPath
 
 -- | Translate a system absolute path back to chroot-relative path
@@ -344,9 +346,36 @@ chrootFileSystem action = do
       FileExists p -> send (FileExists @project (fromChroot chrootRoot parentCwd p))
       IsDirectory p -> send (IsDirectory @project (fromChroot chrootRoot parentCwd p))
       Glob base pat -> do
-        -- Translate base to parent coordinates, pattern unchanged
-        let sysBase = fromChroot chrootRoot parentCwd base
-        send (Glob @project sysBase pat)
+        if isAbsolute pat
+          then do
+            -- Absolute pattern: sanitize to prevent escape, then translate
+            let sanitized = Path.resolvePath pat  -- Handles .. to prevent chroot escape
+                relativePat = dropWhile (== '/') sanitized  -- Strip leading /
+                -- Use chroot root as base for absolute patterns
+                sysBase = fromChroot chrootRoot parentCwd "/"
+            results <- send (Glob @project sysBase relativePat)
+            -- Translate results back to chroot coordinates
+            -- Glob may return absolute paths (system paths) or relative paths depending on implementation
+            return $ fmap (map $ \r ->
+              if isAbsolute r
+                then -- Absolute system path: translate to chroot coordinates
+                     -- Strip chrootRoot prefix and prepend /
+                     let relative = makeRelative chrootRoot r
+                     in "/" </> relative
+                else -- Relative path: make absolute in chroot
+                     "/" </> r
+              ) results
+          else do
+            -- Relative pattern: translate base normally, pattern stays relative
+            let sysBase = fromChroot chrootRoot parentCwd base
+            results <- send (Glob @project sysBase pat)
+            -- Results may be absolute (system) or relative - normalize them
+            return $ fmap (map $ \r ->
+              if isAbsolute r
+                then -- Absolute system path: make relative to the system base we used
+                     makeRelative sysBase r
+                else r  -- Already relative, keep as-is
+              ) results
 
     interceptFileSystemRead :: Member (FileSystemRead project) r' => FilePath -> FilePath -> Sem r' a' -> Sem r' a'
     interceptFileSystemRead chrootRoot parentCwd = intercept $ \case
