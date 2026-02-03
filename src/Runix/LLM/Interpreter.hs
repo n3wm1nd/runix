@@ -37,10 +37,11 @@ import Polysemy.State (State, evalState, get, put)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Default (Default, def)
 
 import UniversalLLM
-import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt)
+import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt, oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..), queryLLM)
@@ -92,7 +93,7 @@ instance RestEndpoint AnthropicAPIKeyAuth where
     authheaders api =
         [ ("x-api-key", anthropicApiKey api)
         , ("anthropic-version", "2023-06-01")
-        , ("Content-Type", "application/json")
+        -- Note: Content-Type is added by RestAPI layer
         ]
 
 -- Internal version with state management
@@ -169,13 +170,7 @@ data AnthropicOAuthAuth = AnthropicOAuthAuth { anthropicOAuthToken :: String }
 
 instance RestEndpoint AnthropicOAuthAuth where
     apiroot _ = "https://api.anthropic.com/v1"
-    authheaders auth =
-        [ ("Authorization", "Bearer " <> anthropicOAuthToken auth)
-        , ("anthropic-version", "2023-06-01")
-        , ("anthropic-beta", "oauth-2025-04-20")
-        , ("Content-Type", "application/json")
-        , ("User-Agent", "hs-universal-llm (prerelease-dev)")
-        ]
+    authheaders auth = map (\(a, b) -> (T.unpack a, T.unpack b) ) $ oauthHeaders (T.pack $ anthropicOAuthToken auth)
 
 -- Internal version with state management
 interpretAnthropicOAuthWithState :: forall model s r a.

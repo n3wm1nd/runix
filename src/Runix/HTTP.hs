@@ -76,7 +76,6 @@ httpIO requestTransform = interpret $ \case
                     Just b -> setRequestBody (RequestBodyLBS b)
                     Nothing -> id
                 $ req
-        info $ fromString request.method <> fromString " " <> fromString request.uri
         resp <- httpLBS hr
         return $ HTTPResponse
             { code = getResponseStatusCode resp
@@ -103,7 +102,6 @@ httpIOStreaming requestTransform = interpret $ \case
                     Just b -> setRequestBody (RequestBodyLBS b)
                     Nothing -> id
                 $ req
-        info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
 
         let checkcancel var = do
                 mchunk <- await
@@ -185,6 +183,42 @@ withStreamingHeaders modifyRequest = intercept $ \case
     HttpRequestStreaming request -> do
         info $ fromString "intercepted streaming request"
         httpRequestStreaming (modifyRequest request)
+
+-- | Simple HTTP logging interceptor - logs method and URI only
+withSimpleHTTPLogging :: Members [Logging, HTTP] r => Sem r a -> Sem r a
+withSimpleHTTPLogging = intercept $ \case
+    HttpRequest request -> do
+        info $ fromString request.method <> fromString " " <> fromString request.uri
+        httpRequest request
+
+-- | Full HTTP logging interceptor - logs method, URI, headers, and body
+withFullHTTPLogging :: Members [Logging, HTTP] r => Sem r a -> Sem r a
+withFullHTTPLogging = intercept $ \case
+    HttpRequest request -> do
+        info $ fromString "HTTP Request: " <> fromString request.method <> fromString " " <> fromString request.uri
+        info $ fromString "Headers: " <> fromString (show request.headers)
+        case request.body of
+            Just b -> info $ fromString "Body: " <> fromString (show b)
+            Nothing -> info $ fromString "Body: (none)"
+        httpRequest request
+
+-- | Simple HTTP streaming logging interceptor - logs method and URI only
+withSimpleHTTPStreamingLogging :: Members [Logging, HTTPStreaming] r => Sem r a -> Sem r a
+withSimpleHTTPStreamingLogging = intercept $ \case
+    HttpRequestStreaming request -> do
+        info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
+        httpRequestStreaming request
+
+-- | Full HTTP streaming logging interceptor - logs method, URI, headers, and body
+withFullHTTPStreamingLogging :: Members [Logging, HTTPStreaming] r => Sem r a -> Sem r a
+withFullHTTPStreamingLogging = intercept $ \case
+    HttpRequestStreaming request -> do
+        info $ fromString "HTTP Streaming Request: " <> fromString request.method <> fromString " " <> fromString request.uri
+        info $ fromString "Headers: " <> fromString (show request.headers)
+        case request.body of
+            Just b -> info $ fromString "Body: " <> fromString (show b)
+            Nothing -> info $ fromString "Body: (none)"
+        httpRequestStreaming request
 
 -- Example usage of withHeaders for setting authentication tokens:
 --
