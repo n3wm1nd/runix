@@ -41,7 +41,7 @@ import qualified Data.Text as T
 import Data.Default (Default, def)
 
 import UniversalLLM
-import UniversalLLM.Providers.Anthropic (Anthropic(..), withMagicSystemPrompt, oauthHeaders)
+import UniversalLLM.Providers.Anthropic (Anthropic(..), oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..), queryLLM)
@@ -193,10 +193,8 @@ interpretAnthropicOAuthWithState composableProvider action = do
                 -- Get current model/stack state from state
                 (model, stackState) <- get
 
-                -- Use universal-llm to build the request with magic system prompt
-                let (stackState', baseRequest) = toProviderRequest composableProvider model configs stackState messages
-                -- Add the magic system prompt for OAuth
-                let request = withMagicSystemPrompt baseRequest
+                -- Use universal-llm to build the request (OAuth provider includes magic system prompt)
+                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
                 let requestValue = toJSONViaCodec request
 
                 -- Check if streaming is enabled
