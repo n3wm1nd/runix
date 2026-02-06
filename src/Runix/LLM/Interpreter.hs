@@ -19,6 +19,10 @@ module Runix.LLM.Interpreter
   , interpretOpenRouter
   , interpretLlamaCpp
   , interpretZAI
+    -- * Unified interpreter
+  , interpretLLM
+    -- * Protocol typeclass
+  , ProviderProtocol(..)
     -- * Cancellation wrapper
   , withLLMCancellation
     -- * Generic model wrappers
@@ -35,6 +39,7 @@ import Polysemy
 import Polysemy.Fail
 import Polysemy.State (State, evalState, get, put)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
+import Data.Aeson (Value)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -46,11 +51,11 @@ import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..), queryLLM)
 import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
-import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming)
+import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming, RestAPI, RestAPIStreaming)
 import Runix.Secret (Secret, getSecret)
 import Runix.Streaming.SSE (reassembleSSE)
 import Runix.Cancellation (Cancellation, onCancellation)
-import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
+import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
 
 -- ============================================================================
@@ -65,6 +70,116 @@ isStreamingEnabled configs =
   case [s | Streaming s <- configs] of
     (s:_) -> s  -- First match wins
     [] -> False  -- Default to non-streaming if not specified
+
+-- ============================================================================
+-- Protocol Typeclass
+-- ============================================================================
+
+-- | Typeclass for provider protocols (Anthropic vs OpenAI-compatible)
+-- Abstracts over the protocol-specific details like endpoint path and streaming handling
+class ProviderProtocol response where
+  -- | The endpoint path for this protocol
+  protocolEndpoint :: Endpoint
+  -- | Create an empty response for streaming accumulation
+  emptyStreamingResponse :: response
+  -- | Merge a streaming delta (as JSON Value) into the accumulated response
+  mergeStreamingDelta :: response -> Value -> response
+
+instance ProviderProtocol AnthropicResponse where
+  protocolEndpoint = Endpoint "messages"
+  emptyStreamingResponse = AnthropicSuccess $
+    AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+  mergeStreamingDelta = mergeAnthropicDelta
+
+instance ProviderProtocol OpenAIResponse where
+  protocolEndpoint = Endpoint "chat/completions"
+  emptyStreamingResponse = OpenAISuccess $
+    defaultOpenAISuccessResponse
+      { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
+  mergeStreamingDelta = mergeOpenAIDelta
+
+-- ============================================================================
+-- Unified Request Helpers
+-- ============================================================================
+
+-- | Send a non-streaming request to the provider
+sendRequest :: forall p response r.
+               ( ProviderProtocol response
+               , HasCodec response
+               , Members '[RestAPI p, Fail] r
+               )
+            => Value -> Sem r response
+sendRequest requestValue = do
+    responseValue <- post (protocolEndpoint @response) requestValue
+    case parseEither parseJSONViaCodec responseValue of
+        Left err -> fail $ "Failed to parse response: " ++ err
+        Right resp -> return resp
+
+-- | Send a streaming request to the provider
+sendRequestStreaming :: forall p response r.
+                        ( ProviderProtocol response
+                        , Members '[RestAPIStreaming p] r
+                        )
+                     => Value -> Sem r response
+sendRequestStreaming requestValue = do
+    httpResp <- postStreaming (protocolEndpoint @response) requestValue
+    return $ reassembleSSE (mergeStreamingDelta @response)
+                           (emptyStreamingResponse @response)
+                           (body httpResp)
+
+-- ============================================================================
+-- Unified LLM Interpreter
+-- ============================================================================
+
+-- | Internal interpreter with explicit state in effect row
+interpretLLMWithState :: forall p model s r a.
+                         ( ModelName model
+                         , HasCodec (ProviderRequest model)
+                         , HasCodec (ProviderResponse model)
+                         , Monoid (ProviderRequest model)
+                         , ProviderProtocol (ProviderResponse model)
+                         , Members '[RestAPI p, RestAPIStreaming p, Fail, State (model, s)] r
+                         )
+                      => ComposableProvider model s
+                      -> Sem (LLM model : r) a
+                      -> Sem r a
+interpretLLMWithState composableProvider = interpret $ \case
+    QueryLLM configs messages -> do
+        (m, stackState) <- get @(model, s)
+        let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
+        let requestValue = toJSONViaCodec request
+        let useStreaming = isStreamingEnabled configs
+
+        providerResponse <- if useStreaming
+            then sendRequestStreaming @p requestValue
+            else sendRequest @p requestValue
+
+        case fromProviderResponse composableProvider m configs stackState' providerResponse of
+            Left err -> fail $ "LLM error: " ++ show err
+            Right (stackState'', resultMessages) -> do
+                put (m, stackState'')
+                return resultMessages
+
+-- | Unified LLM interpreter that works with any provider protocol
+-- Interprets LLM effect using RestAPI and RestAPIStreaming effects
+-- The caller is responsible for setting up the RestAPI stack with appropriate auth
+interpretLLM :: forall p model s r a.
+                ( ModelName model
+                , HasCodec (ProviderRequest model)
+                , HasCodec (ProviderResponse model)
+                , Monoid (ProviderRequest model)
+                , ProviderProtocol (ProviderResponse model)
+                , Default s
+                , Members '[RestAPI p, RestAPIStreaming p, Fail] r
+                )
+             => ComposableProvider model s
+             -> model
+             -> Sem (LLM model : r) a
+             -> Sem r a
+interpretLLM composableProvider model action =
+    evalState (model, def @s) $
+    interpretLLMWithState @p composableProvider $
+    raiseUnder action
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -82,7 +197,7 @@ instance ModelName (Model GenericModel OpenRouter) where
   modelName (Model m _) = modelId m
 
 -- ============================================================================
--- Anthropic Interpreters
+-- Anthropic Auth Configurations
 -- ============================================================================
 
 -- Anthropic API Key Authentication
@@ -93,62 +208,19 @@ instance RestEndpoint AnthropicAPIKeyAuth where
     authheaders api =
         [ ("x-api-key", anthropicApiKey api)
         , ("anthropic-version", "2023-06-01")
-        -- Note: Content-Type is added by RestAPI layer
         ]
 
--- Internal version with state management
-interpretAnthropicAPIKeyWithState :: forall model s r a.
-                            ( ModelName model
-                            , HasCodec (ProviderRequest model)
-                            , HasCodec (ProviderResponse model)
-                            , Monoid (ProviderRequest model)
-                            , ProviderResponse model ~ AnthropicResponse
-                            , Default s
-                            , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
-                            )
-                         => ComposableProvider model s
-                         -> Sem (LLM model : r) a
-                         -> Sem r a
-interpretAnthropicAPIKeyWithState composableProvider action = do
-    apiKey <- getSecret
-    let api = AnthropicAPIKeyAuth apiKey
-        -- We need to thread provider stack state through the computation
-        withRestAPI = reinterpret2 (\case
-            QueryLLM configs messages -> do
-                -- Get current model/stack state from state
-                (model, stackState) <- get
-                -- Thread composable provider state through
-                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
-                let requestValue = toJSONViaCodec request
+-- Anthropic OAuth Authentication (for Claude Code)
+data AnthropicOAuthAuth = AnthropicOAuthAuth { anthropicOAuthToken :: String }
 
-                -- Check if streaming is enabled
-                let useStreaming = isStreamingEnabled configs
+instance RestEndpoint AnthropicOAuthAuth where
+    apiroot _ = "https://api.anthropic.com/v1"
+    authheaders auth = map (\(a, b) -> (T.unpack a, T.unpack b)) $ oauthHeaders (T.pack $ anthropicOAuthToken auth)
 
-                -- Make the API call and get typed response
-                providerResponse <- if useStreaming
-                    then do
-                        -- Streaming: reassemble SSE into typed response
-                        httpResp <- postStreaming (Endpoint "messages") requestValue
-                        let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
-                        return $ reassembleSSE mergeAnthropicDelta (AnthropicSuccess emptyResp) (body httpResp)
-                    else do
-                        -- Non-streaming: parse JSON to typed response
-                        responseValue <- post (Endpoint "messages") requestValue
-                        case parseEither parseJSONViaCodec responseValue of
-                            Left err -> fail $ "Failed to parse Anthropic response: " ++ err
-                            Right resp -> return resp
+-- ============================================================================
+-- Anthropic Interpreters
+-- ============================================================================
 
-                -- Convert provider response to messages, threading state through
-                case fromProviderResponse composableProvider model configs stackState' providerResponse of
-                    Left err -> fail $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        -- Update state with new stack state
-                        put (model, stackState'')
-                        return resultMessages
-            ) action
-    restapiHTTP api $ restapiHTTPStreaming api $ withRestAPI 
-
--- Public wrapper for backward compatibility
 interpretAnthropicAPIKey :: forall model s r a.
                             ( ModelName model
                             , HasCodec (ProviderRequest model)
@@ -159,85 +231,24 @@ interpretAnthropicAPIKey :: forall model s r a.
                             , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                             )
                          => ComposableProvider model s
-                         -> model   -- ^ Model value
+                         -> model
                          -> Sem (LLM model : r) a
                          -> Sem r a
-interpretAnthropicAPIKey composableProvider model action =
-    evalState (model, def) . interpretAnthropicAPIKeyWithState composableProvider . raiseUnder $ action
+interpretAnthropicAPIKey composableProvider model action = do
+    apiKey <- getSecret
+    let api = AnthropicAPIKeyAuth apiKey
+    restapiHTTP api $
+      restapiHTTPStreaming api $
+      interpretLLM @AnthropicAPIKeyAuth composableProvider model $
+      raiseUnder @(RestAPIStreaming AnthropicAPIKeyAuth) $
+      raiseUnder @(RestAPI AnthropicAPIKeyAuth)
+      action
 
--- Anthropic OAuth Authentication (for Claude Code)
-data AnthropicOAuthAuth = AnthropicOAuthAuth { anthropicOAuthToken :: String }
-
-instance RestEndpoint AnthropicOAuthAuth where
-    apiroot _ = "https://api.anthropic.com/v1"
-    authheaders auth = map (\(a, b) -> (T.unpack a, T.unpack b) ) $ oauthHeaders (T.pack $ anthropicOAuthToken auth)
-
--- Internal version with state management
-interpretAnthropicOAuthWithState :: forall model s r a.
-                           ( ModelName model
-                           , HasCodec (ProviderRequest model)
-                           , HasCodec (ProviderResponse model)
-                           , ProviderRequest model ~ AnthropicRequest
-                           , ProviderResponse model ~ AnthropicResponse
-                           , Default s
-                           , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
-                           )
-                        => ComposableProvider model s
-                        -> Sem (LLM model : r) a
-                        -> Sem r a
-interpretAnthropicOAuthWithState composableProvider action = do
-    oauthToken <- getSecret
-    let auth = AnthropicOAuthAuth oauthToken
-        withRestAPI = reinterpret2 (\case
-            QueryLLM configs messages -> do
-                -- Get current model/stack state from state
-                (model, stackState) <- get
-
-                -- Use universal-llm to build the request (OAuth provider includes magic system prompt)
-                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
-                let requestValue = toJSONViaCodec request
-
-                -- Check if streaming is enabled
-                let useStreaming = isStreamingEnabled configs
-
-                -- Make the API call and get typed response
-                providerResponse <- if useStreaming
-                    then do
-                        -- Streaming: reassemble SSE into typed response
-                        httpResp <- postStreaming (Endpoint "messages") requestValue
-                        -- Check HTTP status code for streaming responses
-                        let respCode = Runix.HTTP.code httpResp
-                            respBody = Runix.HTTP.body httpResp
-                        if respCode >= 200 && respCode < 300
-                          then do
-                            let emptyResp = AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
-                            return $ reassembleSSE mergeAnthropicDelta (AnthropicSuccess emptyResp) respBody
-                          else do
-                            -- For error responses, just return an error without parsing SSE
-                            fail $ "HTTP error " ++ show respCode ++ ": " ++ show respBody
-                    else do
-                        -- Non-streaming: parse JSON to typed response
-                        responseValue <- post (Endpoint "messages") requestValue
-                        case parseEither parseJSONViaCodec responseValue of
-                            Left err -> fail $ "Failed to parse Anthropic response: " ++ err
-                            Right resp -> return resp
-
-                -- Convert provider response to messages, threading state through
-                case fromProviderResponse composableProvider model configs stackState' providerResponse of
-                    Left err -> fail $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        -- Update state with new stack state
-                        put (model, stackState'')
-                        return resultMessages
-            ) action
-    restapiHTTP auth $ restapiHTTPStreaming auth  $ withRestAPI
-
--- Public wrapper for backward compatibility
 interpretAnthropicOAuth :: forall model s r a.
                            ( ModelName model
                            , HasCodec (ProviderRequest model)
                            , HasCodec (ProviderResponse model)
-                           , ProviderRequest model ~ AnthropicRequest
+                           , Monoid (ProviderRequest model)
                            , ProviderResponse model ~ AnthropicResponse
                            , Default s
                            , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
@@ -246,11 +257,18 @@ interpretAnthropicOAuth :: forall model s r a.
                         -> model
                         -> Sem (LLM model : r) a
                         -> Sem r a
-interpretAnthropicOAuth composableProvider model action =
-    evalState (model, def) . interpretAnthropicOAuthWithState composableProvider . raiseUnder $ action
+interpretAnthropicOAuth composableProvider model action = do
+    oauthToken <- getSecret
+    let api = AnthropicOAuthAuth oauthToken
+    restapiHTTP api $
+      restapiHTTPStreaming api $
+      interpretLLM @AnthropicOAuthAuth composableProvider model $
+      raiseUnder @(RestAPIStreaming AnthropicOAuthAuth) $
+      raiseUnder @(RestAPI AnthropicOAuthAuth)
+      action
 
 -- ============================================================================
--- OpenAI Interpreter
+-- OpenAI Auth Configuration
 -- ============================================================================
 
 data OpenAIAuth = OpenAIAuth { openaiApiKey :: String }
@@ -262,61 +280,10 @@ instance RestEndpoint OpenAIAuth where
         , ("Content-Type", "application/json")
         ]
 
--- Internal version with state management
-interpretOpenAIWithState :: forall model s r a.
-                   ( ModelName model
-                   , HasCodec (ProviderRequest model)
-                   , HasCodec (ProviderResponse model)
-                   , Monoid (ProviderRequest model)
-                   , ProviderResponse model ~ OpenAIResponse
-                   , Default s
-                   , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
-                   )
-                => ComposableProvider model s
-                -> Sem (LLM model : r) a
-                -> Sem r a
-interpretOpenAIWithState composableProvider action = do
-    apiKey <- getSecret
-    let auth = OpenAIAuth apiKey
-        withRestAPI = reinterpret2 (\case
-            QueryLLM configs messages -> do
-                -- Get current model/stack state from state
-                (model, stackState) <- get
+-- ============================================================================
+-- OpenAI Interpreter
+-- ============================================================================
 
-                -- Use universal-llm to build the request
-                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
-                let requestValue = toJSONViaCodec request
-
-                -- Check if streaming is enabled
-                let useStreaming = isStreamingEnabled configs
-
-                -- Make the API call and get typed response
-                providerResponse <- if useStreaming
-                    then do
-                        -- Streaming: reassemble SSE into typed response
-                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
-                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
-                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
-                    else do
-                        -- Non-streaming: parse JSON to typed response
-                        responseValue <- post (Endpoint "chat/completions") requestValue
-                        case parseEither parseJSONViaCodec responseValue of
-                            Left err -> fail $ "Failed to parse OpenAI response: " ++ err
-                            Right resp -> return resp
-
-                -- Convert provider response to messages, threading state through
-                -- (Error handling is now done in fromProviderResponse)
-                case fromProviderResponse composableProvider model configs stackState' providerResponse of
-                    Left err -> fail $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        -- Update state with new stack state
-                        put (model, stackState'')
-                        return resultMessages
-            ) action
-    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
-
--- Public wrapper for backward compatibility
 interpretOpenAI :: forall model s r a.
                    ( ModelName model
                    , HasCodec (ProviderRequest model)
@@ -327,17 +294,23 @@ interpretOpenAI :: forall model s r a.
                    , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                    )
                 => ComposableProvider model s
-                -> model   -- ^ Model value
+                -> model
                 -> Sem (LLM model : r) a
                 -> Sem r a
-interpretOpenAI composableProvider model action =
-    evalState (model, def) . interpretOpenAIWithState composableProvider . raiseUnder $ action
+interpretOpenAI composableProvider model action = do
+    apiKey <- getSecret
+    let api = OpenAIAuth apiKey
+    restapiHTTP api $
+      restapiHTTPStreaming api $
+      interpretLLM @OpenAIAuth composableProvider model $
+      raiseUnder @(RestAPIStreaming OpenAIAuth) $
+      raiseUnder @(RestAPI OpenAIAuth)
+      action
 
 -- ============================================================================
--- OpenRouter Interpreter
+-- OpenRouter Auth Configuration
 -- ============================================================================
 
--- OpenRouter uses the same API format as OpenAI, but different endpoint
 data OpenRouterAuth = OpenRouterAuth { openrouterApiKey :: String }
 
 instance RestEndpoint OpenRouterAuth where
@@ -347,62 +320,10 @@ instance RestEndpoint OpenRouterAuth where
         , ("Content-Type", "application/json")
         ]
 
--- Internal version with state management
-interpretOpenRouterWithState :: forall model s r a.
-                       ( ModelName model
-                       , HasCodec (ProviderRequest model)
-                       , HasCodec (ProviderResponse model)
-                       , Monoid (ProviderRequest model)
-                       , ProviderResponse model ~ OpenAIResponse
-                       , Default s
-                       , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
-                       )
-                    => ComposableProvider model s
-                    -> Sem (LLM model : r) a
-                    -> Sem r a
-interpretOpenRouterWithState composableProvider action = do
-    apiKey <- getSecret
-    let auth = OpenRouterAuth apiKey
-        withRestAPI = reinterpret2 (\case
-            QueryLLM configs messages -> do
-                -- Get current model/stack state from state
-                (model, stackState) <- get
+-- ============================================================================
+-- OpenRouter Interpreter
+-- ============================================================================
 
-                -- Use universal-llm to build the request
-                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
-                let requestValue = toJSONViaCodec request
-
-                -- Check if streaming is enabled
-                let useStreaming = isStreamingEnabled configs
-
-                -- Make the API call and get typed response
-                providerResponse <- if useStreaming
-                    then do
-                        -- Streaming: reassemble SSE into typed response
-                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
-                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
-                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
-                    else do
-                        -- Non-streaming: parse JSON to typed response
-                        responseValue <- post (Endpoint "chat/completions") requestValue
-                        case parseEither parseJSONViaCodec responseValue of
-                            Left err -> fail $ "Failed to parse OpenRouter response: " ++ err
-                            Right resp -> return resp
-
-                -- Check for error response before parsing
-                -- Convert provider response to messages, threading state through
-                -- (Error handling is now done in fromProviderResponse)
-                case fromProviderResponse composableProvider model configs stackState' providerResponse of
-                    Left err -> fail $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        -- Update state with new stack state
-                        put (model, stackState'')
-                        return resultMessages
-            ) action
-    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
-
--- Public wrapper for backward compatibility
 interpretOpenRouter :: forall model s r a.
                        ( ModelName model
                        , HasCodec (ProviderRequest model)
@@ -413,17 +334,23 @@ interpretOpenRouter :: forall model s r a.
                        , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
                        )
                     => ComposableProvider model s
-                    -> model   -- ^ Model value
+                    -> model
                     -> Sem (LLM model : r) a
                     -> Sem r a
-interpretOpenRouter composableProvider model action =
-    evalState (model, def) . interpretOpenRouterWithState composableProvider . raiseUnder $ action
+interpretOpenRouter composableProvider model action = do
+    apiKey <- getSecret
+    let api = OpenRouterAuth apiKey
+    restapiHTTP api $
+      restapiHTTPStreaming api $
+      interpretLLM @OpenRouterAuth composableProvider model $
+      raiseUnder @(RestAPIStreaming OpenRouterAuth) $
+      raiseUnder @(RestAPI OpenRouterAuth)
+      action
 
 -- ============================================================================
--- ZAI Interpreter
+-- ZAI Auth Configuration
 -- ============================================================================
 
--- ZAI uses OpenAI-compatible API with fixed endpoint
 data ZAIAuth = ZAIAuth { zaiApiKey :: String }
 
 instance RestEndpoint ZAIAuth where
@@ -433,161 +360,69 @@ instance RestEndpoint ZAIAuth where
         , ("Content-Type", "application/json")
         ]
 
--- Internal version with state management
-interpretZAIWithState :: forall model s r a.
-                       ( ModelName model
-                       , HasCodec (ProviderRequest model)
-                       , HasCodec (ProviderResponse model)
-                       , Monoid (ProviderRequest model)
-                       , ProviderResponse model ~ OpenAIResponse
-                       , Default s
-                       , Members '[HTTP, HTTPStreaming, Fail, Secret String, State (model, s)] r
-                       )
-                    => ComposableProvider model s
-                    -> Sem (LLM model : r) a
-                    -> Sem r a
-interpretZAIWithState composableProvider action = do
-    apiKey <- getSecret
-    let auth = ZAIAuth apiKey
-        withRestAPI = reinterpret2 (\case
-            QueryLLM configs messages -> do
-                -- Get current model/stack state from state
-                (model, stackState) <- get
+-- ============================================================================
+-- ZAI Interpreter
+-- ============================================================================
 
-                -- Use universal-llm to build the request
-                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
-                let requestValue = toJSONViaCodec request
-
-                -- Check if streaming is enabled
-                let useStreaming = isStreamingEnabled configs
-
-                -- Make the API call and get typed response
-                providerResponse <- if useStreaming
-                    then do
-                        -- Streaming: reassemble SSE into typed response
-                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
-                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
-                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
-                    else do
-                        -- Non-streaming: parse JSON to typed response
-                        responseValue <- post (Endpoint "chat/completions") requestValue
-                        case parseEither parseJSONViaCodec responseValue of
-                            Left err -> fail $ "Failed to parse ZAI response: " ++ err
-                            Right resp -> return resp
-
-                -- Convert provider response to messages, threading state through
-                case fromProviderResponse composableProvider model configs stackState' providerResponse of
-                    Left err -> fail $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        -- Update state with new stack state
-                        put (model, stackState'')
-                        return resultMessages
-            ) action
-    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
-
--- Public wrapper for backward compatibility
 interpretZAI :: forall model s r a.
-                       ( ModelName model
-                       , HasCodec (ProviderRequest model)
-                       , HasCodec (ProviderResponse model)
-                       , Monoid (ProviderRequest model)
-                       , ProviderResponse model ~ OpenAIResponse
-                       , Default s
-                       , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
-                       )
-                    => ComposableProvider model s
-                    -> model   -- ^ Model value
-                    -> Sem (LLM model : r) a
-                    -> Sem r a
-interpretZAI composableProvider model action =
-    evalState (model, def) . interpretZAIWithState composableProvider . raiseUnder $ action
+                ( ModelName model
+                , HasCodec (ProviderRequest model)
+                , HasCodec (ProviderResponse model)
+                , Monoid (ProviderRequest model)
+                , ProviderResponse model ~ OpenAIResponse
+                , Default s
+                , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                )
+             => ComposableProvider model s
+             -> model
+             -> Sem (LLM model : r) a
+             -> Sem r a
+interpretZAI composableProvider model action = do
+    apiKey <- getSecret
+    let api = ZAIAuth apiKey
+    restapiHTTP api $
+      restapiHTTPStreaming api $
+      interpretLLM @ZAIAuth composableProvider model $
+      raiseUnder @(RestAPIStreaming ZAIAuth) $
+      raiseUnder @(RestAPI ZAIAuth)
+      action
 
 -- ============================================================================
--- Llama.cpp Interpreter
+-- Llama.cpp Auth Configuration
 -- ============================================================================
 
--- Llama.cpp uses OpenAI-compatible API but with custom endpoint
-data LlamaCppAuth = LlamaCppAuth
-    { llamacppEndpoint :: String
-    }
+data LlamaCppAuth = LlamaCppAuth { llamacppEndpoint :: String }
 
 instance RestEndpoint LlamaCppAuth where
     apiroot = llamacppEndpoint
     authheaders _ = [("Content-Type", "application/json")]
 
--- Internal version with state management
-interpretLlamaCppWithState :: forall model s r a.
-                     ( ModelName model
-                     , HasCodec (ProviderRequest model)
-                     , HasCodec (ProviderResponse model)
-                     , ProviderResponse model ~ OpenAIResponse
-                     , Default s
-                     , Members '[HTTP, HTTPStreaming, Fail, State (model, s)] r, Monoid (ProviderRequest model)
-                     )
-                  => ComposableProvider model s
-                  -> String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
-                  -> Sem (LLM model : r) a
-                  -> Sem r a
-interpretLlamaCppWithState composableProvider endpoint action =
-    let auth = LlamaCppAuth endpoint
-        withRestAPI = reinterpret2 (\case
-            QueryLLM configs messages -> do
-                -- Get current model/stack state from state
-                (model, stackState) <- get
+-- ============================================================================
+-- Llama.cpp Interpreter
+-- ============================================================================
 
-                -- Use universal-llm with LlamaCpp (which uses OpenAI protocol)
-                let (stackState', request) = toProviderRequest composableProvider model configs stackState messages
-                let requestValue = toJSONViaCodec request
-
-                -- Check if streaming is enabled
-                let useStreaming = isStreamingEnabled configs
-
-                -- Make the API call and get typed response
-                providerResponse <- if useStreaming
-                    then do
-                        -- Streaming: reassemble SSE into typed response
-                        httpResp <- postStreaming (Endpoint "chat/completions") requestValue
-                        let emptyMsg = defaultOpenAIMessage { role = "assistant" }
-                        let emptyResp = defaultOpenAISuccessResponse { choices = [defaultOpenAIChoice { message = emptyMsg }] }
-                        return $ reassembleSSE mergeOpenAIDelta (OpenAISuccess emptyResp) (body httpResp)
-                    else do
-                        -- Non-streaming: parse JSON to typed response
-                        responseValue <- post (Endpoint "chat/completions") requestValue
-                        case parseEither parseJSONViaCodec responseValue of
-                            Left err -> fail $ "Failed to parse llama.cpp response: " ++ err
-                            Right resp -> return resp
-
-                -- Check for error response before parsing
-                -- Convert provider response to messages, threading state through
-                -- (Error handling is now done in fromProviderResponse)
-                case fromProviderResponse composableProvider model configs stackState' providerResponse of
-                    Left err -> fail $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        -- Update state with new stack state
-                        put (model, stackState'')
-                        return resultMessages
-            ) action
-    in 
-    restapiHTTP auth $ restapiHTTPStreaming auth $ withRestAPI
-
--- Public wrapper for backward compatibility
--- Llama.cpp uses OpenAI protocol internally
 interpretLlamaCpp :: forall model s r a.
                      ( ModelName model
                      , HasCodec (ProviderRequest model)
                      , HasCodec (ProviderResponse model)
+                     , Monoid (ProviderRequest model)
                      , ProviderResponse model ~ OpenAIResponse
                      , Default s
-                     , Members '[HTTP, HTTPStreaming, Fail] r, Monoid (ProviderRequest model)
+                     , Members '[HTTP, HTTPStreaming, Fail] r
                      )
                   => ComposableProvider model s
                   -> String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")
-                  -> model   -- ^ Model value
+                  -> model
                   -> Sem (LLM model : r) a
                   -> Sem r a
 interpretLlamaCpp composableProvider endpoint model action =
-    evalState (model, def) . interpretLlamaCppWithState composableProvider endpoint . raiseUnder $ action
+    let api = LlamaCppAuth endpoint
+    in restapiHTTP api $
+       restapiHTTPStreaming api $
+       interpretLLM @LlamaCppAuth composableProvider model $
+       raiseUnder @(RestAPIStreaming LlamaCppAuth) $
+       raiseUnder @(RestAPI LlamaCppAuth)
+       action
 
 -- ============================================================================
 -- Cancellable Wrapper
