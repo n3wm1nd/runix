@@ -52,34 +52,35 @@ import qualified ChrootTranslationSpec
 -- Test Models
 -- ============================================================================
 
+-- ClaudeSonnet45NoReason for tests that don't need reasoning
+data ClaudeSonnet45NoReason = ClaudeSonnet45NoReason deriving stock (Show, Eq)
+
+instance ModelName (Model ClaudeSonnet45NoReason Anthropic) where
+  modelName _ = "claude-sonnet-4-5-20250929"
+
+instance HasTools (Model ClaudeSonnet45NoReason Anthropic) where
+  withTools = Provider.anthropicTools
+
+-- Composable provider for ClaudeSonnet45NoReason with tools only
+claudeSonnet45NoReasonComposableProvider :: ComposableProvider (Model ClaudeSonnet45NoReason Anthropic) (ToolState (Model ClaudeSonnet45NoReason Anthropic), ())
+claudeSonnet45NoReasonComposableProvider = withTools `chainProviders` Provider.baseComposableProvider
+
+-- ClaudeSonnet45 with reasoning/thinking support (default)
 data ClaudeSonnet45 = ClaudeSonnet45 deriving stock (Show, Eq)
 
 instance ModelName (Model ClaudeSonnet45 Anthropic) where
-  modelName _ = "claude-sonnet-4-5-20250929"
+  modelName (Model _ _) = "claude-sonnet-4-5-20250929"
 
 instance HasTools (Model ClaudeSonnet45 Anthropic) where
   withTools = Provider.anthropicTools
 
--- Composable provider for ClaudeSonnet45 with tools
-claudeSonnet45ComposableProvider :: ComposableProvider (Model ClaudeSonnet45 Anthropic) (ToolState (Model ClaudeSonnet45 Anthropic), ())
-claudeSonnet45ComposableProvider = withTools `chainProviders` Provider.baseComposableProvider
-
--- ClaudeSonnet45 with reasoning/thinking support for extended thinking tests
-data ClaudeSonnet45WithReasoning = ClaudeSonnet45WithReasoning deriving stock (Show, Eq)
-
-instance ModelName (Model ClaudeSonnet45WithReasoning Anthropic) where
-  modelName (Model _ _) = "claude-sonnet-4-5-20250929"
-
-instance HasTools (Model ClaudeSonnet45WithReasoning Anthropic) where
-  withTools = Provider.anthropicTools
-
-instance HasReasoning (Model ClaudeSonnet45WithReasoning Anthropic) where
-  type ReasoningState (Model ClaudeSonnet45WithReasoning Anthropic) = Provider.AnthropicReasoningState
+instance HasReasoning (Model ClaudeSonnet45 Anthropic) where
+  type ReasoningState (Model ClaudeSonnet45 Anthropic) = Provider.AnthropicReasoningState
   withReasoning = Provider.anthropicReasoning
 
--- Composable provider for ClaudeSonnet45WithReasoning with tools and reasoning
-claudeSonnet45WithReasoningComposableProvider :: ComposableProvider (Model ClaudeSonnet45WithReasoning Anthropic) (Provider.AnthropicReasoningState, (ToolState (Model ClaudeSonnet45WithReasoning Anthropic), ()))
-claudeSonnet45WithReasoningComposableProvider = withReasoning `chainProviders` withTools `chainProviders` Provider.baseComposableProvider
+-- Composable provider for ClaudeSonnet45 with tools and reasoning
+claudeSonnet45ComposableProvider :: ComposableProvider (Model ClaudeSonnet45 Anthropic) (Provider.AnthropicReasoningState, (ToolState (Model ClaudeSonnet45 Anthropic), ()))
+claudeSonnet45ComposableProvider = withReasoning `chainProviders` withTools `chainProviders` Provider.baseComposableProvider
 
 -- ============================================================================
 -- Mocked HTTP Effect Provider with cached SSE responses
@@ -216,9 +217,9 @@ main = do
               _ -> fail "Expected exactly one tool call"
 
       it "can parse thinking blocks from SSE streaming response" $ do
-        result <- testRunner claudeSonnet45WithReasoningComposableProvider (Model ClaudeSonnet45WithReasoning Anthropic) thinkingOnlyBody $ do
-          let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45WithReasoning Anthropic)]
-              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45WithReasoning Anthropic)]
+        result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingOnlyBody $ do
+          let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
+              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryLLM configs msgs
 
         case result of
@@ -230,9 +231,9 @@ main = do
             length thinkingBlocks `shouldSatisfy` (> 0)
 
       it "can parse thinking and tool calls from SSE streaming response" $ do
-        result <- testRunner claudeSonnet45WithReasoningComposableProvider (Model ClaudeSonnet45WithReasoning Anthropic) thinkingWithToolsBody $ do
-          let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model ClaudeSonnet45WithReasoning Anthropic)]
-              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45WithReasoning Anthropic)]
+        result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingWithToolsBody $ do
+          let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
+              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryLLM configs msgs
 
         case result of
@@ -247,9 +248,9 @@ main = do
             length toolCalls `shouldSatisfy` (> 0)
 
       it "thinking blocks should come before text in message order" $ do
-        result <- testRunner claudeSonnet45WithReasoningComposableProvider (Model ClaudeSonnet45WithReasoning Anthropic) thinkingOnlyBody $ do
-          let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45WithReasoning Anthropic)]
-              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45WithReasoning Anthropic)]
+        result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingOnlyBody $ do
+          let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
+              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryLLM configs msgs
 
         case result of
