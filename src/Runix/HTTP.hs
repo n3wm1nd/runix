@@ -19,11 +19,13 @@ import Polysemy.Fail
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import Data.Kind (Type)
 import Data.String (fromString)
 import GHC.Stack
 import Network.HTTP.Simple
 import qualified Control.Monad.Catch as CMC
+import Data.CaseInsensitive (original)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro, responseBody)
 import Runix.Logging (Logging, info)
 import Runix.Cancellation (Cancellation, isCanceled)
@@ -79,7 +81,7 @@ httpIO requestTransform = interpret $ \case
         resp <- httpLBS hr
         return $ HTTPResponse
             { code = getResponseStatusCode resp
-            , headers = map (\(hn, b) -> (show hn, show b)) $ getResponseHeaders resp
+            , headers = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b)) $ getResponseHeaders resp
             , body = getResponseBody resp
             }
 
@@ -128,7 +130,7 @@ httpIOStreaming requestTransform = interpret $ \case
                       .| checkcancel canceledVar
                       .| sinkList
                     -- Send the final result with headers to queue
-                    atomically $ writeTQueue updateQueue (StreamResult code (map (\(hn, b) -> (show hn, show b)) headers) chunkList))
+                    atomically $ writeTQueue updateQueue (StreamResult code (map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b)) headers) chunkList))
                 (\(e :: CMC.SomeException) -> do
                     atomically $ writeTQueue updateQueue (StreamError (show e)))
 

@@ -39,19 +39,19 @@ data RestAPIStreaming p (m :: Type -> Type) a where
 makeSem ''RestAPIStreaming
 
 -- Convenience functions for common HTTP methods
-get :: (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
+get :: forall p s r. (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
 get endpoint = restRequest "GET" endpoint (Nothing :: Maybe ())
 
-post :: (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
+post :: forall p req s r. (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
 post endpoint body = restRequest "POST" endpoint (Just body)
 
-put :: (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
+put :: forall p req s r. (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
 put endpoint body = restRequest "PUT" endpoint (Just body)
 
-delete :: (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
+delete :: forall p s r. (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
 delete endpoint = restRequest "DELETE" endpoint (Nothing :: Maybe ())
 
-patch :: (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
+patch :: forall p req s r. (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
 patch endpoint body = restRequest "PATCH" endpoint (Just body)
 
 -- Streaming variants (explicit opt-in) - return raw HTTPResponse
