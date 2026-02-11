@@ -19,6 +19,9 @@ import Data.Aeson
 import Data.Kind (Type)
 import GHC.Stack
 import Runix.HTTP
+import Runix.Streaming (StreamChunk)
+import Runix.Cancellation (Cancellation)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import System.FilePath
 
@@ -95,7 +98,7 @@ restapiHTTP api = interpret $ \case
         else fail $ "HTTP error " <> show response.code <> ": " <> BSL.unpack response.body <> "\n"
 
 -- | REST API streaming interpreter
-restapiHTTPStreaming :: HasCallStack => (RestEndpoint p, Members [HTTPStreaming, Fail] r) => p -> Sem (RestAPIStreaming p : r) a -> Sem r a
+restapiHTTPStreaming :: HasCallStack => (RestEndpoint p, Members [HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail] r) => p -> Sem (RestAPIStreaming p : r) a -> Sem r a
 restapiHTTPStreaming api = interpret $ \case
     RestRequestStreaming method e maybeData -> do
         let httpReq = makeHTTPRequest method e maybeData

@@ -56,6 +56,7 @@ import UniversalLLM (Model(..))
 import Runix.LLM
 
 -- External libraries
+import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import GHC.Stack
 
@@ -88,7 +89,7 @@ compileTaskIO = interpret $ \case
 
 -- | Example OpenRouter interpreter using environment variable
 -- This demonstrates how to compose of various effect interpreters
-openrouter :: Members [Embed IO, Fail, HTTP, HTTPStreaming, Cancellation] r => Sem (LLM (Model GenericModel OpenRouter) : r) a -> Sem r a
+openrouter :: Members [Embed IO, Fail, HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation] r => Sem (LLM (Model GenericModel OpenRouter) : r) a -> Sem r a
 openrouter action = do
     apiKey <- embed $ lookupEnv "OPENROUTER_API_KEY"
     case apiKey of
@@ -102,4 +103,4 @@ openrouter action = do
 -- | Example runner combining all effect interpreters
 -- This demonstrates complete effect stack composition
 runUntrusted :: HasCallStack => (forall r . Members (SafeEffects (Model GenericModel OpenRouter)) r => Sem r a) -> IO (Either String a)
-runUntrusted = runM . runError . loggingIO . failLog . cancelNoop . httpIO_ . ignoreChunks . httpIOStreaming_ . filesystemIO . openrouter . compileTaskIO
+runUntrusted = runM . runError . loggingIO . failLog . cancelNoop . httpIO_ . httpIOStreaming_ . ignoreChunks . filesystemIO . openrouter . compileTaskIO

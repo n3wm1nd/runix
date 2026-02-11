@@ -18,6 +18,7 @@ import Test.Hspec
 import Polysemy
 import Polysemy.Error (runError)
 import Polysemy.Fail (runFail)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Paths_runix (getDataFileName)
 import Data.Default (Default)
@@ -88,10 +89,10 @@ glm45TextOnlyComposableProvider = baseProvider
 
 -- Mock HTTP effect that uses cached SSE responses from test fixtures
 mockHTTP :: BSL.ByteString -> Members '[Logging, Embed IO] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
-mockHTTP sseBody = interpret (\case
-  HTTPEff.HttpRequestStreaming _req -> do
-    -- Streaming: return the cached SSE response
-    return $ HTTPResponse
+mockHTTP sseBody = interpretH (\case
+  HTTPEff.HttpRequestStreaming _req _callback _cancelCheck -> do
+    -- Streaming: return the cached SSE response (mock ignores callback/cancel)
+    pureT $ HTTPResponse
       200
       [("content-type", "text/event-stream")]
       sseBody) . interpret (\case
@@ -128,7 +129,7 @@ testRunner composableProvider model sseBody action =
     . mockHTTP sseBody
     . runSecret (pure ("mock-api-key" :: String))
     . cancelNoop
-    . ignoreChunks
+    . ignoreChunks @BS.ByteString
     . interpretOpenAI composableProvider model
     $ action
 

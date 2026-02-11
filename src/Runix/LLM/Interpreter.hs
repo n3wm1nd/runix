@@ -53,7 +53,9 @@ import Runix.LLM (LLM(..), queryLLM)
 import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, postStreaming, restapiHTTP, restapiHTTPStreaming, RestAPI, RestAPIStreaming)
 import Runix.Secret (Secret, getSecret)
+import Runix.Streaming (StreamChunk)
 import Runix.Streaming.SSE (reassembleSSE)
+import qualified Data.ByteString as BS
 import Runix.Cancellation (Cancellation, onCancellation)
 import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
@@ -228,7 +230,7 @@ interpretAnthropicAPIKey :: forall model s r a.
                             , Monoid (ProviderRequest model)
                             , ProviderResponse model ~ AnthropicResponse
                             , Default s
-                            , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                            , Members '[HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail, Secret String] r
                             )
                          => ComposableProvider model s
                          -> model
@@ -251,7 +253,7 @@ interpretAnthropicOAuth :: forall model s r a.
                            , Monoid (ProviderRequest model)
                            , ProviderResponse model ~ AnthropicResponse
                            , Default s
-                           , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                           , Members '[HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail, Secret String] r
                            )
                         => ComposableProvider model s
                         -> model
@@ -291,7 +293,7 @@ interpretOpenAI :: forall model s r a.
                    , Monoid (ProviderRequest model)
                    , ProviderResponse model ~ OpenAIResponse
                    , Default s
-                   , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                   , Members '[HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail, Secret String] r
                    )
                 => ComposableProvider model s
                 -> model
@@ -331,7 +333,7 @@ interpretOpenRouter :: forall model s r a.
                        , Monoid (ProviderRequest model)
                        , ProviderResponse model ~ OpenAIResponse
                        , Default s
-                       , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                       , Members '[HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail, Secret String] r
                        )
                     => ComposableProvider model s
                     -> model
@@ -371,7 +373,7 @@ interpretZAI :: forall model s r a.
                 , Monoid (ProviderRequest model)
                 , ProviderResponse model ~ OpenAIResponse
                 , Default s
-                , Members '[HTTP, HTTPStreaming, Fail, Secret String] r
+                , Members '[HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail, Secret String] r
                 )
              => ComposableProvider model s
              -> model
@@ -408,7 +410,7 @@ interpretLlamaCpp :: forall model s r a.
                      , Monoid (ProviderRequest model)
                      , ProviderResponse model ~ OpenAIResponse
                      , Default s
-                     , Members '[HTTP, HTTPStreaming, Fail] r
+                     , Members '[HTTP, HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail] r
                      )
                   => ComposableProvider model s
                   -> String  -- ^ Endpoint URL (e.g., "http://localhost:8080/v1")

@@ -55,13 +55,22 @@ data HTTP (m :: Type -> Type) a where
     HttpRequest :: HTTPRequest -> HTTP m HTTPResponse
 makeSem ''HTTP
 
--- | HTTP streaming effect for streaming requests
+-- | HTTP streaming effect for streaming requests (higher-order effect)
+-- The chunk callback receives each chunk as it arrives.
+-- The cancellation callback lets the interpreter poll whether the caller wants to abort.
 data HTTPStreaming (m :: Type -> Type) a where
-    HttpRequestStreaming :: HTTPRequest -> HTTPStreaming m HTTPResponse
-makeSem ''HTTPStreaming
+    HttpRequestStreaming :: HTTPRequest
+                         -> (BS.ByteString -> m ()) -- ^ chunk callback
+                         -> m Bool                  -- ^ cancellation check
+                         -> HTTPStreaming m HTTPResponse
+
+-- | Make a streaming HTTP request, emitting each chunk as a StreamChunk effect
+httpRequestStreaming :: (Member HTTPStreaming r, Member (StreamChunk BS.ByteString) r, Member Cancellation r) => HTTPRequest -> Sem r HTTPResponse
+httpRequestStreaming req = send (HttpRequestStreaming req emitChunk isCanceled)
+
 
 -- | Basic HTTP interpreter (non-streaming)
-httpIO :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, Embed IO, Cancellation] r => Sem (HTTP : r) a -> Sem r a
+httpIO :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
 httpIO requestTransform = interpret $ \case
     HttpRequest request -> do
         parsed <- embed $ CMC.try (parseRequest request.uri)
@@ -85,15 +94,17 @@ httpIO requestTransform = interpret $ \case
             , body = getResponseBody resp
             }
 
--- | HTTP streaming interpreter - emits StreamChunk effects
-httpIOStreaming :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, StreamChunk BS.ByteString, Embed IO, Cancellation] r => Sem (HTTPStreaming : r) a -> Sem r a
-httpIOStreaming requestTransform = interpret $ \case
-    HttpRequestStreaming request -> do
-        -- Streaming request: emit chunks as they arrive
-        parsed <- embed $ CMC.try (parseRequest request.uri)
+-- | HTTP streaming interpreter (higher-order)
+-- Uses interpretH because HTTPStreaming carries callbacks that must be threaded
+-- through the tactical machinery.
+httpIOStreaming :: HasCallStack => (Request -> Request) -> Members [Fail, Logging, Embed IO] r => Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreaming requestTransform = interpretH $ \case
+    HttpRequestStreaming request chunkCallback cancelCheck -> do
+        -- Parse request URI
+        parsed <- raise $ embed $ CMC.try (parseRequest request.uri)
         req <- case parsed of
             Right r -> return r
-            Left (e :: CMC.SomeException) -> fail $
+            Left (e :: CMC.SomeException) -> raise $ fail $
                 "error parsing uri: " <> request.uri <> "\n" <> show e
         let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
         let hr :: Request =
@@ -115,11 +126,11 @@ httpIOStreaming requestTransform = interpret $ \case
                         if canceled then return () else checkcancel var
 
         -- Two communication channels
-        canceledVar <- embed $ newTVarIO False
-        updateQueue <- embed $ newTQueueIO
+        canceledVar <- raise $ embed $ newTVarIO False
+        updateQueue <- raise $ embed $ newTQueueIO
 
         -- Fork background thread - makes ONE request
-        _ <- embed $ forkIO $
+        _ <- raise $ embed $ forkIO $
             CMC.catch
                 (withResponse hr $ \respFull -> do
                     let code = getResponseStatusCode respFull
@@ -134,37 +145,44 @@ httpIOStreaming requestTransform = interpret $ \case
                 (\(e :: CMC.SomeException) -> do
                     atomically $ writeTQueue updateQueue (StreamError (show e)))
 
-        -- Main thread: read updates from queue and emit chunks
+        -- Inspector to extract values from the tactical functor (for IO interop)
+        inspector <- getInspectorT
+
+        -- Main thread: read updates from queue, invoke callbacks for chunks and cancellation
         let consumeUpdates = do
-                -- Check cancellation and signal the background thread
-                canceled <- isCanceled
-                embed $ atomically $ writeTVar canceledVar canceled
+                -- Check cancellation via caller's callback and signal background thread
+                fUnit <- pureT ()
+                fCanceled <- bindTSimple (const cancelCheck) fUnit
+                let canceled = maybe False id $ inspect inspector fCanceled
+                raise $ embed $ atomically $ writeTVar canceledVar canceled
                 -- Wait for the next update from the queue
-                update <- embed $ atomically $ readTQueue updateQueue
+                update <- raise $ embed $ atomically $ readTQueue updateQueue
                 case update of
                     StreamChunk chunk -> do
-                        emitChunk chunk
+                        -- Invoke the caller's chunk callback via tactical machinery
+                        fChunk <- pureT chunk
+                        _ <- bindTSimple chunkCallback fChunk
                         consumeUpdates
-                    StreamError errMsg -> do
-                        fail $ "HTTP streaming error: " ++ errMsg
-                    StreamResult code headers chunks -> do
+                    StreamError errMsg ->
+                        raise $ fail $ "HTTP streaming error: " ++ errMsg
+                    StreamResult code headers chunks ->
                         return (code, headers, chunks)
 
         (code, headers, finalChunks) <- consumeUpdates
         let completeBody = BSL.fromChunks finalChunks
 
-        return $ HTTPResponse
+        pureT $ HTTPResponse
             { code = code
             , headers = headers
             , body = completeBody
             }
 
 -- | Convenience function - httpIO with no request transformation
-httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO, Cancellation] r => Sem (HTTP : r) a -> Sem r a
+httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
 httpIO_ = httpIO id
 
 -- | Convenience function - httpIOStreaming with no request transformation
-httpIOStreaming_ :: HasCallStack => Members [Fail, Logging, StreamChunk BS.ByteString, Embed IO, Cancellation] r => Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreaming_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTPStreaming : r) a -> Sem r a
 httpIOStreaming_ = httpIOStreaming id
 
 -- | Helper function to set request timeout in seconds
@@ -179,12 +197,17 @@ withHeaders modifyRequest = intercept $ \case
         info $ fromString "intercepted request"
         httpRequest (modifyRequest request)
 
--- | Reinterpreter for HTTPStreaming with header support
-withStreamingHeaders :: Members [Fail, Logging, HTTPStreaming] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
-withStreamingHeaders modifyRequest = intercept $ \case
-    HttpRequestStreaming request -> do
-        info $ fromString "intercepted streaming request"
-        httpRequestStreaming (modifyRequest request)
+-- | Reinterpreter for HTTPStreaming with header support (higher-order)
+-- Note: polysemy's interceptH universally quantifies rInitial, so we cannot forward
+-- the original callback through a new `send`. Instead we call httpRequestStreaming
+-- which re-binds the callback to emitChunk — semantically identical since all callers
+-- use emitChunk as the callback via httpRequestStreaming.
+withStreamingHeaders :: Members [Fail, Logging, HTTPStreaming, StreamChunk BS.ByteString, Cancellation] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
+withStreamingHeaders modifyRequest = interceptH $ \case
+    HttpRequestStreaming request _chunkCallback _cancelCheck -> do
+        raise $ info $ fromString "intercepted streaming request"
+        result <- raise $ httpRequestStreaming (modifyRequest request)
+        pureT result
 
 -- | Simple HTTP logging interceptor - logs method and URI only
 withSimpleHTTPLogging :: Members [Logging, HTTP] r => Sem r a -> Sem r a
@@ -204,23 +227,25 @@ withFullHTTPLogging = intercept $ \case
             Nothing -> info $ fromString "Body: (none)"
         httpRequest request
 
--- | Simple HTTP streaming logging interceptor - logs method and URI only
-withSimpleHTTPStreamingLogging :: Members [Logging, HTTPStreaming] r => Sem r a -> Sem r a
-withSimpleHTTPStreamingLogging = intercept $ \case
-    HttpRequestStreaming request -> do
-        info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
-        httpRequestStreaming request
+-- | Simple HTTP streaming logging interceptor - logs method and URI only (higher-order)
+withSimpleHTTPStreamingLogging :: Members [Logging, HTTPStreaming, StreamChunk BS.ByteString, Cancellation] r => Sem r a -> Sem r a
+withSimpleHTTPStreamingLogging = interceptH $ \case
+    HttpRequestStreaming request _chunkCallback _cancelCheck -> do
+        raise $ info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
+        result <- raise $ httpRequestStreaming request
+        pureT result
 
--- | Full HTTP streaming logging interceptor - logs method, URI, headers, and body
-withFullHTTPStreamingLogging :: Members [Logging, HTTPStreaming] r => Sem r a -> Sem r a
-withFullHTTPStreamingLogging = intercept $ \case
-    HttpRequestStreaming request -> do
-        info $ fromString "HTTP Streaming Request: " <> fromString request.method <> fromString " " <> fromString request.uri
-        info $ fromString "Headers: " <> fromString (show request.headers)
-        case request.body of
+-- | Full HTTP streaming logging interceptor - logs method, URI, headers, and body (higher-order)
+withFullHTTPStreamingLogging :: Members [Logging, HTTPStreaming, StreamChunk BS.ByteString, Cancellation] r => Sem r a -> Sem r a
+withFullHTTPStreamingLogging = interceptH $ \case
+    HttpRequestStreaming request _chunkCallback _cancelCheck -> do
+        raise $ info $ fromString "HTTP Streaming Request: " <> fromString request.method <> fromString " " <> fromString request.uri
+        raise $ info $ fromString "Headers: " <> fromString (show request.headers)
+        raise $ case request.body of
             Just b -> info $ fromString "Body: " <> fromString (show b)
             Nothing -> info $ fromString "Body: (none)"
-        httpRequestStreaming request
+        result <- raise $ httpRequestStreaming request
+        pureT result
 
 -- Example usage of withHeaders for setting authentication tokens:
 --
