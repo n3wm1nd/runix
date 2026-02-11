@@ -92,13 +92,13 @@ mockHTTP :: BSL.ByteString -> Members '[Logging, Embed IO] r => Sem (HTTP ': HTT
 mockHTTP sseBody = interpretH (\case
   HTTPEff.HttpRequestStreaming _req _callback _cancelCheck -> do
     -- Streaming: return the cached SSE response (mock ignores callback/cancel)
-    pureT $ HTTPResponse
+    pureT $ Right $ HTTPResponse
       200
       [("content-type", "text/event-stream")]
       sseBody) . interpret (\case
     HTTPEff.HttpRequest _ -> do
       -- Non-streaming: return success with empty response (not tested in these tests)
-      return $ HTTPResponse
+      return $ Right $ HTTPResponse
         200
         [("content-type", "application/json")]
         "{\"id\":\"mock\",\"object\":\"chat.completion\",\"created\":1234567890,\"model\":\"glm-4-plus\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}")
