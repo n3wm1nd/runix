@@ -101,10 +101,10 @@ httpIOStreaming :: HasCallStack => (Request -> Request) -> Members [Fail, Loggin
 httpIOStreaming requestTransform = interpretH $ \case
     HttpRequestStreaming request chunkCallback cancelCheck -> do
         -- Parse request URI
-        parsed <- raise $ embed $ CMC.try (parseRequest request.uri)
+        parsed <- embed $ CMC.try (parseRequest request.uri)
         req <- case parsed of
             Right r -> return r
-            Left (e :: CMC.SomeException) -> raise $ fail $
+            Left (e :: CMC.SomeException) -> fail $
                 "error parsing uri: " <> request.uri <> "\n" <> show e
         let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
         let hr :: Request =
@@ -126,11 +126,11 @@ httpIOStreaming requestTransform = interpretH $ \case
                         if canceled then return () else checkcancel var
 
         -- Two communication channels
-        canceledVar <- raise $ embed $ newTVarIO False
-        updateQueue <- raise $ embed $ newTQueueIO
+        canceledVar <- embed $ newTVarIO False
+        updateQueue <- embed $ newTQueueIO
 
         -- Fork background thread - makes ONE request
-        _ <- raise $ embed $ forkIO $
+        _ <- embed $ forkIO $
             CMC.catch
                 (withResponse hr $ \respFull -> do
                     let code = getResponseStatusCode respFull
@@ -151,20 +151,19 @@ httpIOStreaming requestTransform = interpretH $ \case
         -- Main thread: read updates from queue, invoke callbacks for chunks and cancellation
         let consumeUpdates = do
                 -- Check cancellation via caller's callback and signal background thread
-                fUnit <- pureT ()
-                fCanceled <- bindTSimple (const cancelCheck) fUnit
+                fCanceled <- runTSimple cancelCheck
+
                 let canceled = maybe False id $ inspect inspector fCanceled
-                raise $ embed $ atomically $ writeTVar canceledVar canceled
+                embed $ atomically $ writeTVar canceledVar canceled
                 -- Wait for the next update from the queue
-                update <- raise $ embed $ atomically $ readTQueue updateQueue
+                update <- embed $ atomically $ readTQueue updateQueue
                 case update of
                     StreamChunk chunk -> do
                         -- Invoke the caller's chunk callback via tactical machinery
-                        fChunk <- pureT chunk
-                        _ <- bindTSimple chunkCallback fChunk
+                        _ <- runTSimple $ chunkCallback chunk
                         consumeUpdates
                     StreamError errMsg ->
-                        raise $ fail $ "HTTP streaming error: " ++ errMsg
+                        fail $ "HTTP streaming error: " ++ errMsg
                     StreamResult code headers chunks ->
                         return (code, headers, chunks)
 
