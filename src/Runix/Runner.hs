@@ -50,7 +50,8 @@ import Runix.Compiler
 import Runix.Streaming
 import Runix.Cancellation (Cancellation, cancelNoop)
 import qualified Runix.Compiler.Compiler as Compiler
-import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), interpretOpenRouter)
+import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), OpenRouterAuth(..), interpretLLM)
+import Runix.RestAPI (restapiHTTP)
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 import UniversalLLM (Model(..))
 import Runix.LLM
@@ -95,8 +96,8 @@ openrouter action = do
     case apiKey of
         Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
         Just key ->
-            runSecret (pure key)
-            . interpretOpenRouter OpenAI.baseComposableProvider (Model (GenericModel "deepseek/deepseek-chat-v3-0324:free") OpenRouter)
+            restapiHTTP (OpenRouterAuth key)
+            . interpretLLM @OpenRouterAuth OpenAI.baseComposableProvider (Model (GenericModel "deepseek/deepseek-chat-v3-0324:free") OpenRouter)
             . raiseUnder
             $ action
 

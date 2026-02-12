@@ -70,23 +70,24 @@ class RestEndpoint p where
     apiroot :: p -> String
     authheaders :: p -> [(String, String)]
 
+-- | Build an HTTPRequest from RestEndpoint configuration
+makeHTTPRequest :: (RestEndpoint p, ToJSON r) => p -> String -> Endpoint -> Maybe r -> HTTPRequest
+makeHTTPRequest api method (Endpoint endpoint) body =
+    HTTPRequest
+        { method = method
+        , uri = apiroot api </> endpoint
+        , headers = ("Content-Type", "application/json") : authheaders api
+        , body = fmap encode body
+        }
+
 -- | Basic REST API interpreter (non-streaming)
 restapiHTTP :: HasCallStack => (RestEndpoint p, Members [HTTP, Fail] r) => p -> Sem (RestAPI p : r) a -> Sem r a
 restapiHTTP api = interpret $ \case
     RestRequest method e maybeData -> do
-        let httpReq = makeHTTPRequest method e maybeData
+        let httpReq = makeHTTPRequest api method e maybeData
         response <- httpRequest httpReq
         parseResponse response
   where
-    makeHTTPRequest :: ToJSON r => String -> Endpoint -> Maybe r -> HTTPRequest
-    makeHTTPRequest method (Endpoint endpoint) body =
-        HTTPRequest
-            { method = method
-            , uri = apiroot api </> endpoint
-            , headers = ("Content-Type", "application/json") : authheaders api
-            , body = fmap encode body
-            }
-
     parseResponse :: (FromJSON a, Member Fail r) =>
         HTTPResponse -> Sem r a
     parseResponse response =
@@ -101,15 +102,6 @@ restapiHTTP api = interpret $ \case
 restapiHTTPStreaming :: HasCallStack => (RestEndpoint p, Members [HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail] r) => p -> Sem (RestAPIStreaming p : r) a -> Sem r a
 restapiHTTPStreaming api = interpret $ \case
     RestRequestStreaming method e maybeData -> do
-        let httpReq = makeHTTPRequest method e maybeData
+        let httpReq = makeHTTPRequest api method e maybeData
         -- For streaming, return the raw HTTPResponse without parsing
         httpRequestStreaming httpReq
-  where
-    makeHTTPRequest :: ToJSON r => String -> Endpoint -> Maybe r -> HTTPRequest
-    makeHTTPRequest method (Endpoint endpoint) body =
-        HTTPRequest
-            { method = method
-            , uri = apiroot api </> endpoint
-            , headers = ("Content-Type", "application/json") : authheaders api
-            , body = fmap encode body
-            }

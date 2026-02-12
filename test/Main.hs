@@ -27,18 +27,17 @@ import qualified Data.Aeson.KeyMap as KM
 import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..))
 import qualified UniversalLLM.Providers.Anthropic as Provider
-import UniversalLLM.Protocols.Anthropic (AnthropicRequest, AnthropicResponse)
+import UniversalLLM.Protocols.Anthropic (AnthropicResponse)
 import Autodocodec (HasCodec)
 import Data.Default (Default)
 
-import Runix.LLM.Interpreter (interpretAnthropicOAuth)
-import Runix.LLM (LLM, queryLLM)
+import Runix.LLM.Interpreter (AnthropicOAuthAuth(..))
+import Runix.LLM.Streaming (LLM, queryLLM, interpretLLMStreamingWith)
 import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP as HTTPEff
 import Runix.Logging (Logging, loggingNull)
-import Runix.Secret (runSecret)
-import Runix.Cancellation (cancelNoop)
-import Runix.Streaming (ignoreChunks)
+import Runix.Cancellation (Cancellation, cancelNoop)
+import Runix.Streaming (StreamChunk, ignoreChunks)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
 import qualified FileSystemSecuritySpec
@@ -110,11 +109,11 @@ mockHTTP sseBody = interpretH (\case
 
 -- Reusable test runner that composes all effect interpreters for testing
 -- with mocked HTTP effect provider (generic over model type).
-testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), HasCodec (ProviderResponse model), Monoid (ProviderRequest model), ProviderRequest model ~ AnthropicRequest, ProviderResponse model ~ AnthropicResponse)
+testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), HasCodec (ProviderResponse model), Monoid (ProviderRequest model), ProviderResponse model ~ AnthropicResponse)
            => ComposableProvider model s
            -> model
            -> BSL.ByteString
-           -> (forall r . Members '[LLM model] r => Sem r a)
+           -> (forall r . Member (LLM model) r => Sem r a)
            -> IO (Either String (Either String a))
 testRunner composableProvider model sseBody action =
   runM
@@ -122,10 +121,9 @@ testRunner composableProvider model sseBody action =
     . runFail
     . loggingNull
     . mockHTTP sseBody
-    . runSecret (pure ("mock-token" :: String))
     . cancelNoop
     . ignoreChunks @BS.ByteString
-    . interpretAnthropicOAuth composableProvider model
+    . interpretLLMStreamingWith (AnthropicOAuthAuth "mock-token") composableProvider model
     $ action
 
 -- ============================================================================

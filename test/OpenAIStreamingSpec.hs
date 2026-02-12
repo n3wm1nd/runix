@@ -29,12 +29,11 @@ import qualified UniversalLLM.Providers.OpenAI as Provider
 import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
 import Autodocodec (HasCodec)
 
-import Runix.LLM.Interpreter (interpretOpenAI)
-import Runix.LLM (LLM, queryLLM)
+import Runix.LLM.Interpreter (OpenAIAuth(..))
+import Runix.LLM.Streaming (LLM, queryLLM, interpretLLMStreamingWith)
 import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP as HTTPEff
 import Runix.Logging (Logging, loggingNull)
-import Runix.Secret (runSecret)
 import Runix.Cancellation (cancelNoop)
 import Runix.Streaming (ignoreChunks)
 import UniversalLLM.Providers.XMLToolCalls (xmlResponseParser)
@@ -119,7 +118,7 @@ testRunner :: forall model s a.
            => ComposableProvider model s
            -> model
            -> BSL.ByteString
-           -> (forall r . Members '[LLM model] r => Sem r a)
+           -> (forall r . Member (LLM model) r => Sem r a)
            -> IO (Either String (Either String a))
 testRunner composableProvider model sseBody action =
   runM
@@ -127,10 +126,9 @@ testRunner composableProvider model sseBody action =
     . runFail
     . loggingNull
     . mockHTTP sseBody
-    . runSecret (pure ("mock-api-key" :: String))
     . cancelNoop
     . ignoreChunks @BS.ByteString
-    . interpretOpenAI composableProvider model
+    . interpretLLMStreamingWith (OpenAIAuth "mock-api-key") composableProvider model
     $ action
 
 -- ============================================================================
