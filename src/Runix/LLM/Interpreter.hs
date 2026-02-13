@@ -8,14 +8,19 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 
 module Runix.LLM.Interpreter
-  ( -- * LLM interpreter (requires RestAPI already in effect row)
+  ( -- * LLM interpreters
+    -- ** Non-streaming (requires RestAPI already in effect row)
     interpretLLM
-    -- * Convenience (bundles restapiHTTP + interpretLLM, for tests etc.)
+    -- ** Streaming (requires RestAPI + HTTPStreaming already in effect row)
+  , interpretLLMStreaming
+    -- ** Convenience (bundles restapiHTTP, for tests etc.)
   , interpretLLMWith
+  , interpretLLMStreamingWith
     -- * Protocol typeclass
   , ProviderProtocol(..)
     -- * Cancellation wrapper
@@ -45,15 +50,18 @@ import Data.Aeson (Value)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.ByteString as BS
 import Data.Default (Default, def)
 
 import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..), oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
-import Runix.LLM (LLM(..), queryLLM)
-import Runix.HTTP (HTTP)
-import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
+import Runix.LLM (LLM(..), LLMInfo(..))
+import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..), httpRequestStreaming)
+import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI, makeHTTPRequest)
+import Runix.Streaming (StreamChunk(..))
+import Runix.Streaming.SSE (reassembleSSE, extractContentFromChunk)
 import Runix.Cancellation (Cancellation, onCancellation)
 import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
@@ -86,6 +94,16 @@ instance ProviderProtocol OpenAIResponse where
   mergeStreamingDelta = mergeOpenAIDelta
 
 -- ============================================================================
+-- Configuration Helper
+-- ============================================================================
+
+isStreamingEnabled :: [ModelConfig model] -> Bool
+isStreamingEnabled configs =
+  case [s | Streaming s <- configs] of
+    (s:_) -> s
+    [] -> False
+
+-- ============================================================================
 -- Request Helper
 -- ============================================================================
 
@@ -93,14 +111,12 @@ instance ProviderProtocol OpenAIResponse where
 sendRequest :: forall p response r.
                ( ProviderProtocol response
                , HasCodec response
-               , Members '[RestAPI p, Fail] r
+               , Member (RestAPI p) r
                )
-            => Value -> Sem r response
+            => Value -> Sem r (Either String response)
 sendRequest requestValue = do
     responseValue <- post (protocolEndpoint @response) requestValue
-    case parseEither parseJSONViaCodec responseValue of
-        Left err -> fail $ "Failed to parse response: " ++ err
-        Right resp -> return resp
+    return $ parseEither parseJSONViaCodec responseValue
 
 -- ============================================================================
 -- LLM Interpreter (non-streaming)
@@ -113,27 +129,28 @@ interpretLLMWithState :: forall p model s r a.
                          , HasCodec (ProviderResponse model)
                          , Monoid (ProviderRequest model)
                          , ProviderProtocol (ProviderResponse model)
-                         , Members '[RestAPI p, Fail, State (model, s)] r
+                         , Members '[RestAPI p, State (model, s)] r
                          )
                       => ComposableProvider model s
                       -> Sem (LLM model : r) a
                       -> Sem r a
-interpretLLMWithState composableProvider = interpret $ \case
-    QueryLLM configs messages -> do
+interpretLLMWithState composableProvider = interpretH $ \case
+    QueryLLM configs messages _callback -> do
         (m, stackState) <- get @(model, s)
         let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
         let requestValue = toJSONViaCodec request
 
-        providerResponse <- sendRequest @p requestValue
-
-        case fromProviderResponse composableProvider m configs stackState' providerResponse of
-            Left err -> fail $ "LLM error: " ++ show err
-            Right (stackState'', resultMessages) -> do
-                put (m, stackState'')
-                return resultMessages
+        result <- sendRequest @p requestValue
+        case result of
+            Left err -> pureT $ Left $ "Failed to parse response: " ++ err
+            Right providerResponse ->
+                case fromProviderResponse composableProvider m configs stackState' providerResponse of
+                    Left err -> pureT $ Left $ "LLM error: " ++ show err
+                    Right (stackState'', resultMessages) -> do
+                        put (m, stackState'')
+                        pureT $ Right resultMessages
 
 -- | Non-streaming LLM interpreter.
--- For streaming support, use 'interpretLLMStreaming' from "Runix.LLM.Streaming".
 interpretLLM :: forall p model s r a.
                 ( ModelName model
                 , HasCodec (ProviderRequest model)
@@ -141,7 +158,7 @@ interpretLLM :: forall p model s r a.
                 , Monoid (ProviderRequest model)
                 , ProviderProtocol (ProviderResponse model)
                 , Default s
-                , Members '[RestAPI p, Fail] r
+                , Member (RestAPI p) r
                 )
              => ComposableProvider model s
              -> model
@@ -151,6 +168,89 @@ interpretLLM composableProvider model action =
     evalState (model, def @s) $
     interpretLLMWithState @p composableProvider $
     raiseUnder action
+
+-- ============================================================================
+-- LLM Interpreter (streaming)
+-- ============================================================================
+
+-- | Internal streaming interpreter with explicit state.
+-- Higher-order because 'LLM' carries an info callback.
+--
+-- In the streaming path, locally provides and interprets 'StreamChunk BS.ByteString'
+-- within the tactical row. Each parsed chunk is delivered to the caller's context
+-- via 'runTSimple' in real-time as it arrives from the HTTP layer.
+interpretLLMStreamingWithState :: forall p model s r a.
+                                   ( ModelName model
+                                   , HasCodec (ProviderRequest model)
+                                   , HasCodec (ProviderResponse model)
+                                   , Monoid (ProviderRequest model)
+                                   , ProviderProtocol (ProviderResponse model)
+                                   , RestEndpoint p
+                                   , Members '[RestAPI p, HTTPStreaming, Cancellation, Fail, State (model, s)] r
+                                   )
+                                => p
+                                -> ComposableProvider model s
+                                -> Sem (LLM model : r) a
+                                -> Sem r a
+interpretLLMStreamingWithState api composableProvider = interpretH $ \case
+    QueryLLM configs messages callback -> do
+        (m, stackState) <- get @(model, s)
+        let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
+        let requestValue = toJSONViaCodec request
+
+        if isStreamingEnabled configs
+            then do
+                let httpReq = makeHTTPRequest api "POST" (protocolEndpoint @(ProviderResponse model)) (Just requestValue)
+                httpResp <- interpret (\case
+                    EmitChunk (chunk :: BS.ByteString) -> do
+                        let contents = extractContentFromChunk chunk
+                        mapM_ (\c -> do _ <- runTSimple (callback (EmitLLMInfo c)); return ()) contents
+                    ) $ httpRequestStreaming httpReq
+
+                let providerResponse = reassembleSSE (mergeStreamingDelta @(ProviderResponse model))
+                                                      (emptyStreamingResponse @(ProviderResponse model))
+                                                      (body httpResp)
+                case fromProviderResponse composableProvider m configs stackState' providerResponse of
+                    Left err -> pureT $ Left $ "LLM error: " ++ show err
+                    Right (stackState'', resultMessages) -> do
+                        put (m, stackState'')
+                        pureT $ Right resultMessages
+            else do
+                -- Non-streaming path: no callback events
+                result <- sendRequest @p requestValue
+                case result of
+                    Left err -> pureT $ Left $ "Failed to parse response: " ++ err
+                    Right providerResponse ->
+                        case fromProviderResponse composableProvider m configs stackState' providerResponse of
+                            Left err -> pureT $ Left $ "LLM error: " ++ show err
+                            Right (stackState'', resultMessages) -> do
+                                put (m, stackState'')
+                                pureT $ Right resultMessages
+
+-- | Streaming LLM interpreter.
+--
+-- When @Streaming True@ is in configs, uses 'HTTPStreaming' and delivers
+-- parsed SSE chunks via the 'LLMInfo' callback. When streaming is disabled,
+-- falls back to non-streaming 'RestAPI'.
+interpretLLMStreaming :: forall p model s r a.
+                          ( ModelName model
+                          , HasCodec (ProviderRequest model)
+                          , HasCodec (ProviderResponse model)
+                          , Monoid (ProviderRequest model)
+                          , ProviderProtocol (ProviderResponse model)
+                          , RestEndpoint p
+                          , Default s
+                          , Members '[RestAPI p, HTTPStreaming, Cancellation, Fail] r
+                          )
+                       => p
+                       -> ComposableProvider model s
+                       -> model
+                       -> Sem (LLM model : r) a
+                       -> Sem r a
+interpretLLMStreaming api composableProvider model action =
+    evalState (model, def @s) $
+    interpretLLMStreamingWithState @p api composableProvider $
+    raiseUnder @(State (model, s)) action
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -222,12 +322,10 @@ instance RestEndpoint LlamaCppAuth where
     authheaders _ = [("Content-Type", "application/json")]
 
 -- ============================================================================
--- Generic Interpreter
+-- Convenience Interpreters (bundle restapiHTTP)
 -- ============================================================================
 
--- | Generic non-streaming LLM interpreter that works with any RestEndpoint.
--- The caller provides the endpoint configuration (with auth already resolved).
--- For streaming, use 'interpretLLMStreamingWith' from "Runix.LLM.Streaming".
+-- | Non-streaming convenience interpreter.
 interpretLLMWith :: forall p model s r a.
                     ( ModelName model
                     , HasCodec (ProviderRequest model)
@@ -249,6 +347,28 @@ interpretLLMWith api composableProvider model action =
     raiseUnder @(RestAPI p)
     action
 
+-- | Streaming convenience interpreter.
+interpretLLMStreamingWith :: forall p model s r a.
+                              ( ModelName model
+                              , HasCodec (ProviderRequest model)
+                              , HasCodec (ProviderResponse model)
+                              , Monoid (ProviderRequest model)
+                              , ProviderProtocol (ProviderResponse model)
+                              , RestEndpoint p
+                              , Default s
+                              , Members '[HTTP, HTTPStreaming, Cancellation, Fail] r
+                              )
+                           => p
+                           -> ComposableProvider model s
+                           -> model
+                           -> Sem (LLM model : r) a
+                           -> Sem r a
+interpretLLMStreamingWith api composableProvider model action =
+    restapiHTTP api $
+    interpretLLMStreaming @p api composableProvider model $
+    raiseUnder @(RestAPI p)
+    action
+
 -- ============================================================================
 -- Cancellable Wrapper
 -- ============================================================================
@@ -259,6 +379,8 @@ withLLMCancellation :: forall model r a.
                        Member Cancellation r
                     => Sem (LLM model : r) a
                     -> Sem (LLM model : r) a
-withLLMCancellation action = reinterpret (\case
-    QueryLLM configs messages -> onCancellation [] (queryLLM configs messages)
+withLLMCancellation action = reinterpretH (\case
+    QueryLLM configs messages _callback ->
+        -- TODO: forward callback through cancellation wrapper
+        pureT =<< raise (onCancellation (Right []) (send (QueryLLM configs messages (\_ -> pure ()))))
     ) action

@@ -17,7 +17,7 @@ module Main (main) where
 import Test.Hspec
 import Polysemy
 import Polysemy.Error (runError)
-import Polysemy.Fail (runFail)
+import Polysemy.Fail (Fail, runFail)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Paths_runix (getDataFileName)
@@ -32,7 +32,8 @@ import Autodocodec (HasCodec)
 import Data.Default (Default)
 
 import Runix.LLM.Interpreter (AnthropicOAuthAuth(..))
-import Runix.LLM.Streaming (LLM, queryLLM, interpretLLMStreamingWith)
+import Runix.LLM.Interpreter (interpretLLMStreamingWith)
+import Runix.LLM (LLM, queryLLM)
 import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP as HTTPEff
 import Runix.Logging (Logging, loggingNull)
@@ -113,7 +114,7 @@ testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderR
            => ComposableProvider model s
            -> model
            -> BSL.ByteString
-           -> (forall r . Member (LLM model) r => Sem r a)
+           -> (forall r . Members '[LLM model, Fail] r => Sem r a)
            -> IO (Either String (Either String a))
 testRunner composableProvider model sseBody action =
   runM
