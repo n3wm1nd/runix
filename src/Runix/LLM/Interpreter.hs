@@ -179,6 +179,9 @@ interpretLLM composableProvider model action =
 -- In the streaming path, locally provides and interprets 'StreamChunk BS.ByteString'
 -- within the tactical row. Each parsed chunk is delivered to the caller's context
 -- via 'runTSimple' in real-time as it arrives from the HTTP layer.
+--
+-- The callback in 'QueryLLM' is executed via 'runTSimple' for each streaming
+-- chunk. An 'interceptH' layer above can replace the callback to route chunks.
 interpretLLMStreamingWithState :: forall p model s r a.
                                    ( ModelName model
                                    , HasCodec (ProviderRequest model)
@@ -204,7 +207,7 @@ interpretLLMStreamingWithState api composableProvider = interpretH $ \case
                 httpResp <- interpret (\case
                     EmitChunk (chunk :: BS.ByteString) -> do
                         let contents = extractContentFromChunk chunk
-                        mapM_ (\c -> do _ <- runTSimple (callback (EmitLLMInfo c)); return ()) contents
+                        mapM_ (\c -> do _ <- runTSimple (callback (LLMInfo c)); return ()) contents
                     ) $ httpRequestStreaming httpReq
 
                 let providerResponse = reassembleSSE (mergeStreamingDelta @(ProviderResponse model))
@@ -230,8 +233,11 @@ interpretLLMStreamingWithState api composableProvider = interpretH $ \case
 -- | Streaming LLM interpreter.
 --
 -- When @Streaming True@ is in configs, uses 'HTTPStreaming' and delivers
--- parsed SSE chunks via the 'LLMInfo' callback. When streaming is disabled,
+-- parsed SSE chunks via the callback in 'QueryLLM'. When streaming is disabled,
 -- falls back to non-streaming 'RestAPI'.
+--
+-- The callback in 'QueryLLM' is executed via 'runTSimple', so an 'interceptH'
+-- layer above can replace the callback to route chunks (e.g. to a TUI widget).
 interpretLLMStreaming :: forall p model s r a.
                           ( ModelName model
                           , HasCodec (ProviderRequest model)

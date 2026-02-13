@@ -8,7 +8,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 -- | Core LLM effect.
 --
@@ -23,10 +22,8 @@ module Runix.LLM
     LLM(..)
   , queryLLM
 
-    -- * LLM Info Effect (used internally and by Runix.LLM.WithInfo)
+    -- * LLM Info (plain data, not an effect)
   , LLMInfo(..)
-  , emitLLMInfo
-  , swallowLLMInfo
 
     -- * Convenience functions
   , askLLM
@@ -66,33 +63,24 @@ import Runix.LLM.ToolInstances ()
 
 import Runix.Streaming.SSE (StreamingContent)
 
--- | The LLM info effect — a write-only sideband for metadata emitted during queries.
+-- | Info metadata delivered during LLM queries (streaming chunks, usage, etc.).
 --
--- Streaming chunks, usage stats, cost information, warnings, etc. are delivered
--- through this effect. The constructors carry only data, so the interpreter can
--- produce values in any monadic context and the call-site callback simply
--- re-sends them via @send@ in the caller's context.
-data LLMInfo (m :: Type -> Type) a where
-    EmitLLMInfo :: StreamingContent -> LLMInfo m ()
-
-makeSem ''LLMInfo
-
--- | Swallow all LLMInfo events (noop interpreter).
-swallowLLMInfo :: Sem (LLMInfo : r) a -> Sem r a
-swallowLLMInfo = interpret $ \case
-    EmitLLMInfo _ -> pure ()
+-- Plain data, delivered to the callback in 'QueryLLM'.
+data LLMInfo = LLMInfo StreamingContent
+  deriving (Show, Eq)
 
 -- | The LLM effect — higher-order due to the info callback.
 --
--- The callback receives 'LLMInfo' values from the interpreter (produced in
--- the tactical row) and re-sends them in the caller's monadic context.
--- This is structural plumbing — use 'queryLLM' (or 'queryLLM' from
--- "Runix.LLM.WithInfo" for info-aware queries) instead.
+-- 'QueryLLM' performs a query with a monadic callback for streaming info.
+-- The callback is replaceable: an 'interceptH' layer above the interpreter
+-- can substitute it (e.g. to route chunks to a TUI widget).
+-- If no interceptor is present, the default callback (typically @\\_ -> pure ()@)
+-- is used and info is silently discarded.
 data LLM model (m :: Type -> Type) a where
-    QueryLLM :: [ModelConfig model]                    -- ^ Temperature, MaxTokens, Tools, etc.
-             -> [Message model]                         -- ^ History (append manually)
-             -> (LLMInfo m () -> m ())                  -- ^ Callback: re-sends LLMInfo values in caller's context
-             -> LLM model m (Either String [Message model])  -- ^ Response messages or error
+    QueryLLM    :: [ModelConfig model]                    -- ^ Temperature, MaxTokens, Tools, etc.
+                -> [Message model]                         -- ^ History (append manually)
+                -> (LLMInfo -> m ())                       -- ^ Callback: delivers info in caller's context
+                -> LLM model m (Either String [Message model])  -- ^ Response messages or error
 
 -- | Query the LLM with no info observation (standard agent usage).
 --
