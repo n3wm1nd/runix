@@ -11,12 +11,10 @@
 
 -- | Core LLM effect.
 --
--- This module provides the standard LLM interface where info events
--- (streaming chunks, usage, etc.) are silently discarded.
---
--- For an info-aware interface where streaming chunks are observable,
--- import "Runix.LLM.WithInfo" instead — it re-exports everything from
--- this module but replaces 'queryLLM' with a version that emits 'LLMInfo'.
+-- The standard LLM interface. Streaming chunks are delivered via the
+-- callback in 'QueryLLM'. By default the callback is a no-op; an
+-- 'interceptH' layer above the interpreter can replace it to route
+-- chunks (e.g. to a TUI widget).
 module Runix.LLM
   ( -- * LLM Effect
     LLM(..)
@@ -82,10 +80,10 @@ data LLM model (m :: Type -> Type) a where
                 -> (LLMInfo -> m ())                       -- ^ Callback: delivers info in caller's context
                 -> LLM model m (Either String [Message model])  -- ^ Response messages or error
 
--- | Query the LLM with no info observation (standard agent usage).
+-- | Query the LLM (standard agent usage).
 --
--- Info events (streaming chunks, usage, etc.) are silently discarded.
--- For an info-aware version, use 'queryLLM' from "Runix.LLM.WithInfo".
+-- The callback is a no-op; streaming chunks are only delivered if an
+-- 'interceptH' layer above replaces the callback.
 queryLLM :: Members '[LLM model, Fail] r => [ModelConfig model] -> [Message model] -> Sem r [Message model]
 queryLLM configs msgs = do
     result <- send (QueryLLM configs msgs (\_ -> pure ()))

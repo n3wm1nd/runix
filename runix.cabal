@@ -76,7 +76,6 @@ library
         Runix.HTTP,
         Runix.RestAPI,
         Runix.LLM,
-        Runix.LLM.WithInfo,
         Runix.LLM.Interpreter,
         Runix.LLM.ToolInstances,
         Runix.LLM.ToolExecution,
