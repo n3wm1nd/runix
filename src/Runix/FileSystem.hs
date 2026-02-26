@@ -53,6 +53,11 @@ import Runix.Logging (Logging, info)
 import qualified System.Directory
 import System.IO.Error (tryIOError)
 import qualified Runix.FileSystem.Path as Path
+import System.INotify (EventVariety(..), WatchDescriptor, initINotify, killINotify, addWatch, removeWatch)
+import Control.Concurrent.STM (newTVarIO, readTVarIO, readTVar, atomically, modifyTVar', writeTVar)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import qualified Data.ByteString.Char8 as BS8
 
 -- | Core filesystem effect - provides project metadata and structure exploration
 -- This allows seeing the directory tree without reading file contents
@@ -855,6 +860,109 @@ fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\cas
             WatcherState watched <- get @WatcherState
             return $ Map.keys watched
     ) action
+
+-- | INotify state: tracks watched files and the set of paths flagged as changed by inotify
+data INotifyWatcherState = INotifyWatcherState
+    { inWatched    :: !(Map FilePath (ByteString, WatchDescriptor))
+      -- ^ project-relative path -> (last known content, inotify watch descriptor)
+    , inChangedSet :: !(Set FilePath)
+      -- ^ project-relative paths that inotify reported as modified
+    }
+
+emptyINotifyWatcherState :: INotifyWatcherState
+emptyINotifyWatcherState = INotifyWatcherState Map.empty Set.empty
+
+-- | INotify-based interpreter for FileWatcher effect
+-- Uses Linux inotify for kernel-driven file change notifications instead of polling.
+-- Only re-reads files that inotify has flagged as changed, avoiding unnecessary I/O.
+fileWatcherINotify :: forall project r a.
+                      ( HasCallStack
+                      , HasProjectPath project
+                      , Members '[Embed IO, Logging, FileSystem project] r
+                      )
+                   => Sem (FileWatcher project : r) a -> Sem r a
+fileWatcherINotify action = do
+    inotify <- embed initINotify
+    stateVar <- embed $ newTVarIO emptyINotifyWatcherState
+    result <- interpret (\case
+        WatchFile path -> do
+            st <- embed $ readTVarIO stateVar
+            -- Skip if already watching this path (avoids leaking watch descriptors)
+            case Map.lookup path (inWatched st) of
+                Just _ -> return ()
+                Nothing -> do
+                    project <- getFileSystem @project
+                    let systemPath = projectToSystemPath project path
+                    contentResult <- embed $ tryIOError $ BS.readFile systemPath
+                    case contentResult of
+                        Left _ -> return ()  -- Silently ignore files that can't be read
+                        Right content -> do
+                            wdResult <- embed $ tryIOError $
+                                addWatch inotify [CloseWrite, DeleteSelf, MoveSelf]
+                                         (BS8.pack systemPath)
+                                         (\_ -> atomically $ modifyTVar' stateVar $ \s ->
+                                             s { inChangedSet = Set.insert path (inChangedSet s) })
+                            case wdResult of
+                                Left _ -> return ()  -- Silently ignore watch failures
+                                Right wd -> do
+                                    embed $ atomically $ modifyTVar' stateVar $ \s ->
+                                        s { inWatched = Map.insert path (content, wd) (inWatched s) }
+                                    info $ fromString $ "Watching file (inotify): " ++ path
+
+        GetChangedFiles -> do
+            project <- getFileSystem @project
+            -- Atomically grab and clear the changed set
+            changed <- embed $ atomically $ do
+                s <- readTVar stateVar
+                writeTVar stateVar s { inChangedSet = Set.empty }
+                return (inChangedSet s)
+            -- For each changed path, compare old content with current file
+            let changedList = Set.toList changed
+            st <- embed $ readTVarIO stateVar
+            changedFiles <- fmap catMaybes $ forM changedList $ \path -> do
+                case Map.lookup path (inWatched st) of
+                    Nothing -> return Nothing  -- Path no longer tracked
+                    Just (oldContent, _wd) -> do
+                        let systemPath = projectToSystemPath project path
+                        contentResult <- embed $ tryIOError $ BS.readFile systemPath
+                        case contentResult of
+                            Left _ -> return Nothing  -- File disappeared
+                            Right newContent
+                                | newContent /= oldContent -> return $ Just (path, oldContent, newContent)
+                                | otherwise -> return Nothing
+            -- Update stored content for files that actually changed
+            embed $ atomically $ modifyTVar' stateVar $ \s ->
+                let updates = Map.fromList [(p, (nc, wd))
+                                           | (p, _old, nc) <- changedFiles
+                                           , Just (_c, wd) <- [Map.lookup p (inWatched s)]]
+                in s { inWatched = Map.union updates (inWatched s) }
+            return changedFiles
+
+        ClearWatched -> do
+            st <- embed $ readTVarIO stateVar
+            -- Remove all inotify watches
+            embed $ mapM_ (\(_content, wd) -> tryIOError $ removeWatch wd) (Map.elems (inWatched st))
+            embed $ atomically $ writeTVar stateVar emptyINotifyWatcherState
+            info $ fromString "Cleared all watched files (inotify)"
+
+        UnwatchFile path -> do
+            st <- embed $ readTVarIO stateVar
+            case Map.lookup path (inWatched st) of
+                Nothing -> return ()
+                Just (_content, wd) -> do
+                    embed $ tryIOError (removeWatch wd) >> return ()
+                    embed $ atomically $ modifyTVar' stateVar $ \s ->
+                        s { inWatched    = Map.delete path (inWatched s)
+                          , inChangedSet = Set.delete path (inChangedSet s)
+                          }
+                    info $ fromString $ "Stopped watching file (inotify): " ++ path
+
+        GetWatchedFiles -> do
+            st <- embed $ readTVarIO stateVar
+            return $ Map.keys (inWatched st)
+        ) action
+    embed $ killINotify inotify
+    return result
 
 -- | No-op interpreter for FileWatcher (for CLI or other contexts where watching is not needed)
 fileWatcherNoop :: Sem (FileWatcher project : r) a -> Sem r a
