@@ -73,6 +73,7 @@ library
         Runix.Cmd,
         Runix.Streaming,
         Runix.Streaming.SSE,
+        Runix.Streaming.SSE.Conduit,
         Runix.HTTP,
         Runix.RestAPI,
         Runix.LLM,
