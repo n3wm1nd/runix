@@ -35,12 +35,6 @@ data RestAPI p (m :: Type -> Type) a where
 
 makeSem ''RestAPI
 
--- | REST API streaming effect for streaming requests
-data RestAPIStreaming p (m :: Type -> Type) a where
-    RestRequestStreaming :: (ToJSON r) => String -> Endpoint -> Maybe r -> RestAPIStreaming p m HTTPResponse
-
-makeSem ''RestAPIStreaming
-
 -- Convenience functions for common HTTP methods
 get :: forall p s r. (FromJSON s, Member (RestAPI p) r) => Endpoint -> Sem r s
 get endpoint = restRequest "GET" endpoint (Nothing :: Maybe ())
@@ -57,15 +51,6 @@ delete endpoint = restRequest "DELETE" endpoint (Nothing :: Maybe ())
 patch :: forall p req s r. (ToJSON req, FromJSON s, Member (RestAPI p) r) => Endpoint -> req -> Sem r s
 patch endpoint body = restRequest "PATCH" endpoint (Just body)
 
--- Streaming variants (explicit opt-in) - return raw HTTPResponse
-postStreaming :: (ToJSON req, Member (RestAPIStreaming p) r) => Endpoint -> req -> Sem r HTTPResponse
-postStreaming endpoint body = restRequestStreaming "POST" endpoint (Just body)
-
-putStreaming :: (ToJSON req, Member (RestAPIStreaming p) r) => Endpoint -> req -> Sem r HTTPResponse
-putStreaming endpoint body = restRequestStreaming "PUT" endpoint (Just body)
-
-patchStreaming :: (ToJSON req, Member (RestAPIStreaming p) r) => Endpoint -> req -> Sem r HTTPResponse
-patchStreaming endpoint body = restRequestStreaming "PATCH" endpoint (Just body)
 class RestEndpoint p where
     apiroot :: p -> String
     authheaders :: p -> [(String, String)]
@@ -97,11 +82,3 @@ restapiHTTP api = interpret $ \case
             Just result -> return result
             Nothing -> fail $ "Failed to parse JSON response: " <> BSL.unpack response.body <> "\n"
         else fail $ "HTTP error " <> show response.code <> ": " <> BSL.unpack response.body <> "\n"
-
--- | REST API streaming interpreter
-restapiHTTPStreaming :: HasCallStack => (RestEndpoint p, Members [HTTPStreaming, StreamChunk BS.ByteString, Cancellation, Fail] r) => p -> Sem (RestAPIStreaming p : r) a -> Sem r a
-restapiHTTPStreaming api = interpret $ \case
-    RestRequestStreaming method e maybeData -> do
-        let httpReq = makeHTTPRequest api method e maybeData
-        -- For streaming, return the raw HTTPResponse without parsing
-        httpRequestStreaming httpReq

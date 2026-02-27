@@ -17,10 +17,10 @@ module Runix.LLM.Interpreter
     -- ** Non-streaming (requires RestAPI already in effect row)
     interpretLLM
     -- ** Streaming (requires RestAPI + HTTPStreaming already in effect row)
-  , interpretLLMStreaming
+  -- , interpretLLMStreaming  -- NOTE: Temporarily commented out during refactoring
     -- ** Convenience (bundles restapiHTTP, for tests etc.)
   , interpretLLMWith
-  , interpretLLMStreamingWith
+  -- , interpretLLMStreamingWith  -- NOTE: Temporarily commented out during refactoring
     -- * Protocol typeclass
   , ProviderProtocol(..)
     -- * Cancellation wrapper
@@ -182,81 +182,82 @@ interpretLLM composableProvider model action =
 --
 -- The callback in 'QueryLLM' is executed via 'runTSimple' for each streaming
 -- chunk. An 'interceptH' layer above can replace the callback to route chunks.
-interpretLLMStreamingWithState :: forall p model s r a.
-                                   ( ModelName model
-                                   , HasCodec (ProviderRequest model)
-                                   , HasCodec (ProviderResponse model)
-                                   , Monoid (ProviderRequest model)
-                                   , ProviderProtocol (ProviderResponse model)
-                                   , RestEndpoint p
-                                   , Members '[RestAPI p, HTTPStreaming, Cancellation, Fail, State (model, s)] r
-                                   )
-                                => p
-                                -> ComposableProvider model s
-                                -> Sem (LLM model : r) a
-                                -> Sem r a
-interpretLLMStreamingWithState api composableProvider = interpretH $ \case
-    QueryLLM configs messages callback -> do
-        (m, stackState) <- get @(model, s)
-        let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
-        let requestValue = toJSONViaCodec request
-
-        if isStreamingEnabled configs
-            then do
-                let httpReq = makeHTTPRequest api "POST" (protocolEndpoint @(ProviderResponse model)) (Just requestValue)
-                httpResp <- interpret (\case
-                    EmitChunk (chunk :: BS.ByteString) -> do
-                        let contents = extractContentFromChunk chunk
-                        mapM_ (\c -> do _ <- runTSimple (callback (LLMInfo c)); return ()) contents
-                    ) $ httpRequestStreaming httpReq
-
-                let providerResponse = reassembleSSE (mergeStreamingDelta @(ProviderResponse model))
-                                                      (emptyStreamingResponse @(ProviderResponse model))
-                                                      (body httpResp)
-                case fromProviderResponse composableProvider m configs stackState' providerResponse of
-                    Left err -> pureT $ Left $ "LLM error: " ++ show err
-                    Right (stackState'', resultMessages) -> do
-                        put (m, stackState'')
-                        pureT $ Right resultMessages
-            else do
-                -- Non-streaming path: no callback events
-                result <- sendRequest @p requestValue
-                case result of
-                    Left err -> pureT $ Left $ "Failed to parse response: " ++ err
-                    Right providerResponse ->
-                        case fromProviderResponse composableProvider m configs stackState' providerResponse of
-                            Left err -> pureT $ Left $ "LLM error: " ++ show err
-                            Right (stackState'', resultMessages) -> do
-                                put (m, stackState'')
-                                pureT $ Right resultMessages
-
--- | Streaming LLM interpreter.
+-- NOTE: Temporarily commented out during refactoring - will be rewritten in Phase 3
+-- interpretLLMStreamingWithState :: forall p model s r a.
+--                                    ( ModelName model
+--                                    , HasCodec (ProviderRequest model)
+--                                    , HasCodec (ProviderResponse model)
+--                                    , Monoid (ProviderRequest model)
+--                                    , ProviderProtocol (ProviderResponse model)
+--                                    , RestEndpoint p
+--                                    , Members '[RestAPI p, HTTPStreaming, Cancellation, Fail, State (model, s)] r
+--                                    )
+--                                 => p
+--                                 -> ComposableProvider model s
+--                                 -> Sem (LLM model : r) a
+--                                 -> Sem r a
+-- interpretLLMStreamingWithState api composableProvider = interpretH $ \case
+--     QueryLLM configs messages callback -> do
+--         (m, stackState) <- get @(model, s)
+--         let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
+--         let requestValue = toJSONViaCodec request
 --
--- When @Streaming True@ is in configs, uses 'HTTPStreaming' and delivers
--- parsed SSE chunks via the callback in 'QueryLLM'. When streaming is disabled,
--- falls back to non-streaming 'RestAPI'.
+--         if isStreamingEnabled configs
+--             then do
+--                 let httpReq = makeHTTPRequest api "POST" (protocolEndpoint @(ProviderResponse model)) (Just requestValue)
+--                 httpResp <- interpret (\case
+--                     EmitChunk (chunk :: BS.ByteString) -> do
+--                         let contents = extractContentFromChunk chunk
+--                         mapM_ (\c -> do _ <- runTSimple (callback (LLMInfo c)); return ()) contents
+--                     ) $ httpRequestStreaming httpReq
 --
--- The callback in 'QueryLLM' is executed via 'runTSimple', so an 'interceptH'
--- layer above can replace the callback to route chunks (e.g. to a TUI widget).
-interpretLLMStreaming :: forall p model s r a.
-                          ( ModelName model
-                          , HasCodec (ProviderRequest model)
-                          , HasCodec (ProviderResponse model)
-                          , Monoid (ProviderRequest model)
-                          , ProviderProtocol (ProviderResponse model)
-                          , RestEndpoint p
-                          , Default s
-                          , Members '[RestAPI p, HTTPStreaming, Cancellation, Fail] r
-                          )
-                       => p
-                       -> ComposableProvider model s
-                       -> model
-                       -> Sem (LLM model : r) a
-                       -> Sem r a
-interpretLLMStreaming api composableProvider model action =
-    evalState (model, def @s) $
-    interpretLLMStreamingWithState @p api composableProvider $
-    raiseUnder @(State (model, s)) action
+--                 let providerResponse = reassembleSSE (mergeStreamingDelta @(ProviderResponse model))
+--                                                       (emptyStreamingResponse @(ProviderResponse model))
+--                                                       (body httpResp)
+--                 case fromProviderResponse composableProvider m configs stackState' providerResponse of
+--                     Left err -> pureT $ Left $ "LLM error: " ++ show err
+--                     Right (stackState'', resultMessages) -> do
+--                         put (m, stackState'')
+--                         pureT $ Right resultMessages
+--             else do
+--                 -- Non-streaming path: no callback events
+--                 result <- sendRequest @p requestValue
+--                 case result of
+--                     Left err -> pureT $ Left $ "Failed to parse response: " ++ err
+--                     Right providerResponse ->
+--                         case fromProviderResponse composableProvider m configs stackState' providerResponse of
+--                             Left err -> pureT $ Left $ "LLM error: " ++ show err
+--                             Right (stackState'', resultMessages) -> do
+--                                 put (m, stackState'')
+--                                 pureT $ Right resultMessages
+--
+-- -- | Streaming LLM interpreter.
+-- --
+-- -- When @Streaming True@ is in configs, uses 'HTTPStreaming' and delivers
+-- -- parsed SSE chunks via the callback in 'QueryLLM'. When streaming is disabled,
+-- -- falls back to non-streaming 'RestAPI'.
+-- --
+-- -- The callback in 'QueryLLM' is executed via 'runTSimple', so an 'interceptH'
+-- -- layer above can replace the callback to route chunks (e.g. to a TUI widget).
+-- interpretLLMStreaming :: forall p model s r a.
+--                           ( ModelName model
+--                           , HasCodec (ProviderRequest model)
+--                           , HasCodec (ProviderResponse model)
+--                           , Monoid (ProviderRequest model)
+--                           , ProviderProtocol (ProviderResponse model)
+--                           , RestEndpoint p
+--                           , Default s
+--                           , Members '[RestAPI p, HTTPStreaming, Cancellation, Fail] r
+--                           )
+--                        => p
+--                        -> ComposableProvider model s
+--                        -> model
+--                        -> Sem (LLM model : r) a
+--                        -> Sem r a
+-- interpretLLMStreaming api composableProvider model action =
+--     evalState (model, def @s) $
+--     interpretLLMStreamingWithState @p api composableProvider $
+--     raiseUnder @(State (model, s)) action
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -353,27 +354,28 @@ interpretLLMWith api composableProvider model action =
     raiseUnder @(RestAPI p)
     action
 
--- | Streaming convenience interpreter.
-interpretLLMStreamingWith :: forall p model s r a.
-                              ( ModelName model
-                              , HasCodec (ProviderRequest model)
-                              , HasCodec (ProviderResponse model)
-                              , Monoid (ProviderRequest model)
-                              , ProviderProtocol (ProviderResponse model)
-                              , RestEndpoint p
-                              , Default s
-                              , Members '[HTTP, HTTPStreaming, Cancellation, Fail] r
-                              )
-                           => p
-                           -> ComposableProvider model s
-                           -> model
-                           -> Sem (LLM model : r) a
-                           -> Sem r a
-interpretLLMStreamingWith api composableProvider model action =
-    restapiHTTP api $
-    interpretLLMStreaming @p api composableProvider model $
-    raiseUnder @(RestAPI p)
-    action
+-- NOTE: Temporarily commented out during refactoring - will be rewritten in Phase 3
+-- -- | Streaming convenience interpreter.
+-- interpretLLMStreamingWith :: forall p model s r a.
+--                               ( ModelName model
+--                               , HasCodec (ProviderRequest model)
+--                               , HasCodec (ProviderResponse model)
+--                               , Monoid (ProviderRequest model)
+--                               , ProviderProtocol (ProviderResponse model)
+--                               , RestEndpoint p
+--                               , Default s
+--                               , Members '[HTTP, HTTPStreaming, Cancellation, Fail] r
+--                               )
+--                            => p
+--                            -> ComposableProvider model s
+--                            -> model
+--                            -> Sem (LLM model : r) a
+--                            -> Sem r a
+-- interpretLLMStreamingWith api composableProvider model action =
+--     restapiHTTP api $
+--     interpretLLMStreaming @p api composableProvider model $
+--     raiseUnder @(RestAPI p)
+--     action
 
 -- ============================================================================
 -- Cancellable Wrapper
