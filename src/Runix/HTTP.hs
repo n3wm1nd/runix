@@ -28,8 +28,6 @@ import qualified Control.Monad.Catch as CMC
 import Data.CaseInsensitive (original)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro, responseBody)
 import Runix.Logging (Logging, info)
-import Runix.Cancellation (Cancellation, isCanceled)
-import Runix.Streaming (StreamChunk, emitChunk)
 import Conduit
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
@@ -47,8 +45,6 @@ data HTTPResponse = HTTPResponse {
     headers :: [(String, String)],
     body :: ByteString
 } deriving (Show)
-
-data StreamUpdate = StreamChunk BS.ByteString | StreamResult Int [(String, String)] [BS.ByteString] | StreamError String
 
 -- | Basic HTTP effect for non-streaming requests
 data HTTP (m :: Type -> Type) a where
