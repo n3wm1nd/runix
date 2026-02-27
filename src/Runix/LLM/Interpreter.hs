@@ -16,7 +16,9 @@ module Runix.LLM.Interpreter
   ( -- * LLM interpreters
     -- ** Non-streaming (requires RestAPI already in effect row)
     interpretLLM
-    -- ** Streaming (requires RestAPI + HTTPStreaming already in effect row)
+    -- ** LLMStream interpreter (new streaming architecture)
+  , interpretLLMStream
+    -- ** Streaming (old architecture - commented out during refactoring)
   -- , interpretLLMStreaming  -- NOTE: Temporarily commented out during refactoring
     -- ** Convenience (bundles restapiHTTP, for tests etc.)
   , interpretLLMWith
@@ -58,6 +60,7 @@ import UniversalLLM.Providers.Anthropic (Anthropic(..), oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..), LLMInfo(..))
+import Runix.LLMStream (LLMStream(..), startStream)
 import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..), httpRequestStreaming)
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI, makeHTTPRequest)
 import Runix.Streaming (StreamChunk(..))
@@ -123,6 +126,7 @@ sendRequest requestValue = do
 -- ============================================================================
 
 -- | Internal interpreter with explicit state in effect row
+-- | Internal interpreter with explicit state - first-order, no streaming
 interpretLLMWithState :: forall p model s r a.
                          ( ModelName model
                          , HasCodec (ProviderRequest model)
@@ -134,21 +138,21 @@ interpretLLMWithState :: forall p model s r a.
                       => ComposableProvider model s
                       -> Sem (LLM model : r) a
                       -> Sem r a
-interpretLLMWithState composableProvider = interpretH $ \case
-    QueryLLM configs messages _callback -> do
+interpretLLMWithState composableProvider = interpret $ \case
+    QueryLLM configs messages -> do
         (m, stackState) <- get @(model, s)
         let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
         let requestValue = toJSONViaCodec request
 
         result <- sendRequest @p requestValue
         case result of
-            Left err -> pureT $ Left $ "Failed to parse response: " ++ err
+            Left err -> return $ Left $ "Failed to parse response: " ++ err
             Right providerResponse ->
                 case fromProviderResponse composableProvider m configs stackState' providerResponse of
-                    Left err -> pureT $ Left $ "LLM error: " ++ show err
+                    Left err -> return $ Left $ "LLM error: " ++ show err
                     Right (stackState'', resultMessages) -> do
                         put (m, stackState'')
-                        pureT $ Right resultMessages
+                        return $ Right resultMessages
 
 -- | Non-streaming LLM interpreter.
 interpretLLM :: forall p model s r a.
@@ -258,6 +262,57 @@ interpretLLM composableProvider model action =
 --     evalState (model, def @s) $
 --     interpretLLMStreamingWithState @p api composableProvider $
 --     raiseUnder @(State (model, s)) action
+
+-- ============================================================================
+-- LLMStream Interpreter (new streaming architecture)
+-- ============================================================================
+
+-- | LLMStream interpreter - returns raw chunk source from HTTPStreaming
+--
+-- This is a simple pass-through: builds the provider request and returns
+-- the streaming source from HTTPStreaming. No SSE parsing, no reassembly.
+interpretLLMStream :: forall p model s r a.
+                      ( ModelName model
+                      , HasCodec (ProviderRequest model)
+                      , Monoid (ProviderRequest model)
+                      , ProviderProtocol (ProviderResponse model)
+                      , RestEndpoint p
+                      , Default s
+                      , Members '[HTTPStreaming, Fail, State (model, s)] r
+                      )
+                   => p
+                   -> ComposableProvider model s
+                   -> model
+                   -> Sem (LLMStream model : r) a
+                   -> Sem r a
+interpretLLMStream api composableProvider model action =
+    evalState (model, def @s) $
+    interpretLLMStreamWithState @p api composableProvider $
+    raiseUnder @(State (model, s)) action
+  where
+    interpretLLMStreamWithState :: forall p' model' s' r' a'.
+                                   ( ModelName model'
+                                   , HasCodec (ProviderRequest model')
+                                   , Monoid (ProviderRequest model')
+                                   , ProviderProtocol (ProviderResponse model')
+                                   , RestEndpoint p'
+                                   , Members '[HTTPStreaming, Fail, State (model', s')] r'
+                                   )
+                                => p'
+                                -> ComposableProvider model' s'
+                                -> Sem (LLMStream model' : r') a'
+                                -> Sem r' a'
+    interpretLLMStreamWithState api' composableProvider' = interpret $ \case
+        StartStream configs messages -> do
+            (m, stackState) <- get @(model', s')
+            let (stackState', request) = toProviderRequest composableProvider' m configs stackState messages
+            put (m, stackState')  -- Update state even though we're not parsing response yet
+
+            let requestValue = toJSONViaCodec request
+            let httpReq = makeHTTPRequest api' "POST" (protocolEndpoint @(ProviderResponse model')) (Just requestValue)
+
+            -- Get streaming source from HTTPStreaming
+            httpRequestStreaming httpReq
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -387,8 +442,7 @@ withLLMCancellation :: forall model r a.
                        Member Cancellation r
                     => Sem (LLM model : r) a
                     -> Sem (LLM model : r) a
-withLLMCancellation action = reinterpretH (\case
-    QueryLLM configs messages _callback ->
-        -- TODO: forward callback through cancellation wrapper
-        pureT =<< raise (onCancellation (Right []) (send (QueryLLM configs messages (\_ -> pure ()))))
+withLLMCancellation action = intercept (\case
+    QueryLLM configs messages ->
+        onCancellation (Right []) (send (QueryLLM configs messages))
     ) action

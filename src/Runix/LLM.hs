@@ -67,26 +67,19 @@ import Runix.Streaming.SSE (StreamingContent)
 data LLMInfo = LLMInfo StreamingContent
   deriving (Show, Eq)
 
--- | The LLM effect — higher-order due to the info callback.
+-- | The LLM effect — first-order request/response.
 --
--- 'QueryLLM' performs a query with a monadic callback for streaming info.
--- The callback is replaceable: an 'interceptH' layer above the interpreter
--- can substitute it (e.g. to route chunks to a TUI widget).
--- If no interceptor is present, the default callback (typically @\\_ -> pure ()@)
--- is used and info is silently discarded.
+-- 'QueryLLM' performs a query and returns complete response messages.
+-- For streaming/interactive generation, use the LLMStream effect instead.
 data LLM model (m :: Type -> Type) a where
     QueryLLM    :: [ModelConfig model]                    -- ^ Temperature, MaxTokens, Tools, etc.
                 -> [Message model]                         -- ^ History (append manually)
-                -> (LLMInfo -> m ())                       -- ^ Callback: delivers info in caller's context
                 -> LLM model m (Either String [Message model])  -- ^ Response messages or error
 
 -- | Query the LLM (standard agent usage).
---
--- The callback is a no-op; streaming chunks are only delivered if an
--- 'interceptH' layer above replaces the callback.
 queryLLM :: Members '[LLM model, Fail] r => [ModelConfig model] -> [Message model] -> Sem r [Message model]
 queryLLM configs msgs = do
-    result <- send (QueryLLM configs msgs (\_ -> pure ()))
+    result <- send (QueryLLM configs msgs)
     case result of
         Left err -> fail err
         Right messages -> return messages
