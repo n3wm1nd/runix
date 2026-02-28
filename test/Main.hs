@@ -31,7 +31,7 @@ import UniversalLLM.Protocols.Anthropic (AnthropicResponse)
 import Autodocodec (HasCodec)
 import Data.Default (Default)
 
-import Runix.LLM.Interpreter (AnthropicOAuthAuth(..), ProviderProtocol)
+import Runix.LLM.Interpreter (AnthropicOAuthAuth(..), ProviderProtocol, EnableStreaming, ProtocolRequest)
 import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
 import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
@@ -128,7 +128,7 @@ mockHTTP sseBody =
 
 -- Reusable test runner that composes all effect interpreters for testing
 -- with mocked HTTP effect provider (generic over model type).
-testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), Monoid (ProviderRequest model), ProviderProtocol (ProviderResponse model), ProviderResponse model ~ AnthropicResponse)
+testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), Monoid (ProviderRequest model), EnableStreaming (ProviderResponse model), ProtocolRequest (ProviderResponse model) ~ ProviderRequest model, HasStreaming model, ProviderResponse model ~ AnthropicResponse)
            => ComposableProvider model s
            -> model
            -> BSL.ByteString
@@ -189,7 +189,7 @@ main = do
       it "can parse text from SSE streaming response" $ do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) textResponseBody $ do
           let msgs = [UserText "Hello"] :: [Message (Model ClaudeSonnet45 Anthropic)]
-              configs = [Streaming True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
+              configs = [] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryStreamingLLM configs msgs
 
         case result of
@@ -205,7 +205,7 @@ main = do
       it "can parse tool calls from SSE streaming response" $ do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) toolCallResponseBody $ do
           let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
-              configs = [Streaming True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
+              configs = [] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryStreamingLLM configs msgs
 
         case result of
@@ -237,7 +237,7 @@ main = do
       it "can parse thinking blocks from SSE streaming response" $ do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingOnlyBody $ do
           let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
-              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
+              configs = [Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryStreamingLLM configs msgs
 
         case result of
@@ -251,7 +251,7 @@ main = do
       it "can parse thinking and tool calls from SSE streaming response" $ do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingWithToolsBody $ do
           let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
-              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
+              configs = [Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryStreamingLLM configs msgs
 
         case result of
@@ -268,7 +268,7 @@ main = do
       it "thinking blocks should come before text in message order" $ do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingOnlyBody $ do
           let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
-              configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
+              configs = [Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
           queryStreamingLLM configs msgs
 
         case result of

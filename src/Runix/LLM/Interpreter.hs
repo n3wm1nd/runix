@@ -11,6 +11,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Runix.LLM.Interpreter
   ( -- * LLM interpreters
@@ -25,6 +26,8 @@ module Runix.LLM.Interpreter
   , interpretLLMStreamingWith
     -- * Protocol typeclass
   , ProviderProtocol(..)
+  , EnableStreaming(..)
+  , ProtocolRequest
     -- * Cancellation wrapper
   , withLLMCancellation
     -- * Generic model wrappers
@@ -67,8 +70,8 @@ import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI
 import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (StreamingContent(..), extractContentFromChunk, parseSSE)
 import qualified Data.ByteString.Lazy as BSL
-import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
+import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming)
 
 -- ============================================================================
 -- Protocol Typeclass
@@ -77,6 +80,7 @@ import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(
 -- | Typeclass for provider protocols (Anthropic vs OpenAI-compatible)
 -- Abstracts over the protocol-specific details like endpoint path and streaming handling
 class ProviderProtocol response where
+  type ProtocolRequest response
   -- | The endpoint path for this protocol
   protocolEndpoint :: Endpoint
   -- | Create an empty response for streaming accumulation
@@ -85,17 +89,33 @@ class ProviderProtocol response where
   mergeStreamingDelta :: response -> Value -> response
 
 instance ProviderProtocol AnthropicResponse where
+  type ProtocolRequest AnthropicResponse = AnthropicRequest
   protocolEndpoint = Endpoint "messages"
   emptyStreamingResponse = AnthropicSuccess $
     AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
   mergeStreamingDelta = mergeAnthropicDelta
 
 instance ProviderProtocol OpenAIResponse where
+  type ProtocolRequest OpenAIResponse = OpenAIRequest
   protocolEndpoint = Endpoint "chat/completions"
   emptyStreamingResponse = OpenAISuccess $
     defaultOpenAISuccessResponse
       { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
   mergeStreamingDelta = mergeOpenAIDelta
+
+-- ============================================================================
+-- Streaming Enabler Typeclass
+-- ============================================================================
+
+-- | Typeclass to enable streaming based on the response type
+class ProviderProtocol response => EnableStreaming response where
+  enableStreamingForProtocol :: ProtocolRequest response -> ProtocolRequest response
+
+instance EnableStreaming AnthropicResponse where
+  enableStreamingForProtocol = enableAnthropicStreaming
+
+instance EnableStreaming OpenAIResponse where
+  enableStreamingForProtocol = enableOpenAIStreaming
 
 -- ============================================================================
 -- Request Helper
@@ -186,7 +206,9 @@ interpretLLMStream :: forall p model s r a.
                       ( ModelName model
                       , HasCodec (ProviderRequest model)
                       , Monoid (ProviderRequest model)
-                      , ProviderProtocol (ProviderResponse model)
+                      , EnableStreaming (ProviderResponse model)
+                      , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
+                      , HasStreaming model
                       , RestEndpoint p
                       , Default s
                       , Members '[HTTPStreaming, Fail] r
@@ -211,7 +233,9 @@ interpretLLMStream api composableProvider model action =
 
         -- Build the provider request
         let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
-            requestValue = encode $ toJSONViaCodec request
+            -- Enable streaming on the request
+            streamingRequest = enableStreamingForProtocol @(ProviderResponse model) request
+            requestValue = encode $ toJSONViaCodec streamingRequest
             httpReq = HTTPRequest
                 { method = "POST"
                 , uri = apiroot api <> "/" <> case protocolEndpoint @(ProviderResponse model) of Endpoint p -> p
@@ -420,7 +444,9 @@ interpretLLMStreamingWith :: forall p model s r a.
                              ( ModelName model
                              , HasCodec (ProviderRequest model)
                              , Monoid (ProviderRequest model)
-                             , ProviderProtocol (ProviderResponse model)
+                             , EnableStreaming (ProviderResponse model)
+                             , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
+                             , HasStreaming model
                              , RestEndpoint p
                              , Default s
                              , Members '[HTTPStreaming, Fail] r

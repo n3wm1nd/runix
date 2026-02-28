@@ -29,7 +29,7 @@ import qualified UniversalLLM.Providers.OpenAI as Provider
 import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
 import Autodocodec (HasCodec)
 
-import Runix.LLM.Interpreter (OpenAIAuth(..), ProviderProtocol)
+import Runix.LLM.Interpreter (OpenAIAuth(..), ProviderProtocol, EnableStreaming, ProtocolRequest)
 import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
 import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
@@ -131,7 +131,9 @@ testRunner :: forall model s a.
               , Default s
               , HasCodec (ProviderRequest model)
               , Monoid (ProviderRequest model)
-              , ProviderProtocol (ProviderResponse model)
+              , EnableStreaming (ProviderResponse model)
+              , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
+              , HasStreaming model
               , ProviderResponse model ~ OpenAIResponse
               )
            => ComposableProvider model s
@@ -175,7 +177,7 @@ spec = do
     it "can parse text from SSE streaming response" $ do
       result <- testRunner glm45TextOnlyComposableProvider (Model GLM45TextOnly OpenAI) textResponseBody $ do
         let msgs = [UserText "Say hello"] :: [Message (Model GLM45TextOnly OpenAI)]
-            configs = [Streaming True] :: [ModelConfig (Model GLM45TextOnly OpenAI)]
+            configs = [] :: [ModelConfig (Model GLM45TextOnly OpenAI)]
         queryStreamingLLM configs msgs
 
       case result of
@@ -189,7 +191,7 @@ spec = do
     it "can parse tool calls from SSE streaming response" $ do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) toolCallResponseBody $ do
         let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model GLM45 OpenAI)]
-            configs = [Streaming True] :: [ModelConfig (Model GLM45 OpenAI)]
+            configs = [] :: [ModelConfig (Model GLM45 OpenAI)]
         queryStreamingLLM configs msgs
 
       case result of
@@ -205,7 +207,7 @@ spec = do
     it "can parse reasoning blocks from SSE streaming response" $ do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) reasoningOnlyBody $ do
         let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model GLM45 OpenAI)]
-            configs = [Streaming True, Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
+            configs = [Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
         queryStreamingLLM configs msgs
 
       case result of
@@ -218,7 +220,7 @@ spec = do
     it "can parse reasoning and tool calls from SSE streaming response" $ do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) reasoningWithToolsBody $ do
         let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model GLM45 OpenAI)]
-            configs = [Streaming True, Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
+            configs = [Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
         queryStreamingLLM configs msgs
 
       case result of
@@ -235,7 +237,7 @@ spec = do
     it "reasoning blocks should come before text in message order" $ do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) reasoningOnlyBody $ do
         let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model GLM45 OpenAI)]
-            configs = [Streaming True, Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
+            configs = [Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
         queryStreamingLLM configs msgs
 
       case result of
