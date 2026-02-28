@@ -21,6 +21,8 @@ module Runix.LLM.Interpreter
   , interpretLLMStream
   , startLLMStream
   , queryStreamingLLM
+    -- ** Interpret LLM in terms of LLMStreaming
+  , interpretLLMViaStreaming
     -- ** Convenience (bundles restapiHTTP, for tests etc.)
   , interpretLLMWith
   , interpretLLMStreamingWith
@@ -343,6 +345,22 @@ queryStreamingLLM configs messages = do
     case messagesResult of
         Left err -> fail err
         Right msgs -> return msgs
+
+-- ============================================================================
+-- Interpret LLM in terms of LLMStreaming
+-- ============================================================================
+
+-- | Interpret LLM effect using LLMStreaming infrastructure
+--
+-- This allows non-streaming LLM code to run on top of streaming infrastructure.
+-- It consumes all streaming events internally and returns the final accumulated messages.
+interpretLLMViaStreaming :: forall model r a.
+                            Members '[LLMStreaming model, Fail] r
+                         => Sem (LLM model : r) a
+                         -> Sem r a
+interpretLLMViaStreaming = interpret $ \case
+    QueryLLM configs messages -> do
+        Right <$> queryStreamingLLM configs messages
 
 -- ============================================================================
 -- Generic Model Wrapper
