@@ -29,14 +29,17 @@ import qualified UniversalLLM.Providers.OpenAI as Provider
 import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
 import Autodocodec (HasCodec)
 
-import Runix.LLM.Interpreter (OpenAIAuth(..))
-import Runix.LLM.Interpreter (interpretLLMStreamingWith)
+import Runix.LLM.Interpreter (OpenAIAuth(..), ProviderProtocol)
+import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
-import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
+import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
+import Runix.Streaming (fetchNext)
+import Runix.HTTP (HTTP, HTTPRequest, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP as HTTPEff
 import Runix.Logging (Logging, loggingNull)
 import Runix.Cancellation (cancelNoop)
-import Runix.Streaming (ignoreChunks)
+import Runix.StreamChunk (ignoreChunks)
+import Runix.Streaming (interpretStreamingStateful)
 import UniversalLLM.Providers.XMLToolCalls (xmlResponseParser)
 
 -- ============================================================================
@@ -88,20 +91,35 @@ glm45TextOnlyComposableProvider = baseProvider
 -- ============================================================================
 
 -- Mock HTTP effect that uses cached SSE responses from test fixtures
-mockHTTP :: BSL.ByteString -> Members '[Logging, Embed IO] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
-mockHTTP sseBody = interpretH (\case
-  HTTPEff.HttpRequestStreaming _req _callback _cancelCheck -> do
-    -- Streaming: return the cached SSE response (mock ignores callback/cancel)
-    pureT $ Right $ HTTPResponse
-      200
-      [("content-type", "text/event-stream")]
-      sseBody) . interpret (\case
-    HTTPEff.HttpRequest _ -> do
-      -- Non-streaming: return success with empty response (not tested in these tests)
-      return $ Right $ HTTPResponse
-        200
-        [("content-type", "application/json")]
-        "{\"id\":\"mock\",\"object\":\"chat.completion\",\"created\":1234567890,\"model\":\"glm-4-plus\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}")
+mockHTTP :: forall r a. BSL.ByteString -> Members '[Logging, Embed IO, Fail] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
+mockHTTP sseBody =
+    -- First interpret HTTPStreaming (which is Streaming BS.ByteString () HTTPRequest)
+    interpretStreamingStateful onStart onFetch onClose
+    -- Then interpret HTTP (non-streaming)
+    . interpret @HTTP (\case
+        HTTPEff.HttpRequest _ -> do
+          -- Non-streaming: return success with empty response (not tested in these tests)
+          return $ Right $ HTTPResponse
+            200
+            [("content-type", "application/json")]
+            "{\"id\":\"mock\",\"object\":\"chat.completion\",\"created\":1234567890,\"model\":\"glm-4-plus\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}")
+  where
+    -- Convert lazy ByteString to chunks of strict ByteStrings
+    chunks :: [BS.ByteString]
+    chunks = BSL.toChunks sseBody
+
+    -- Stream state: just the list of remaining chunks
+    onStart :: HTTPRequest -> Sem r (Either String [BS.ByteString])
+    onStart _req = return $ Right chunks
+
+    -- Fetch next chunk
+    onFetch :: [BS.ByteString] -> Sem r (Maybe BS.ByteString, [BS.ByteString])
+    onFetch [] = return (Nothing, [])
+    onFetch (c:cs) = return (Just c, cs)
+
+    -- Close: return unit
+    onClose :: [BS.ByteString] -> Sem r ()
+    onClose _ = return ()
 
 -- ============================================================================
 -- Test Runner
@@ -112,14 +130,14 @@ testRunner :: forall model s a.
               ( ModelName model
               , Default s
               , HasCodec (ProviderRequest model)
-              , HasCodec (ProviderResponse model)
               , Monoid (ProviderRequest model)
+              , ProviderProtocol (ProviderResponse model)
               , ProviderResponse model ~ OpenAIResponse
               )
            => ComposableProvider model s
            -> model
            -> BSL.ByteString
-           -> (forall r . Members '[LLM model, Fail] r => Sem r a)
+           -> (forall r . Members '[LLMStreaming model, Fail] r => Sem r a)
            -> IO (Either String (Either String a))
 testRunner composableProvider model sseBody action =
   runM
@@ -158,7 +176,7 @@ spec = do
       result <- testRunner glm45TextOnlyComposableProvider (Model GLM45TextOnly OpenAI) textResponseBody $ do
         let msgs = [UserText "Say hello"] :: [Message (Model GLM45TextOnly OpenAI)]
             configs = [Streaming True] :: [ModelConfig (Model GLM45TextOnly OpenAI)]
-        queryLLM configs msgs
+        queryStreamingLLM configs msgs
 
       case result of
         Left err -> fail $ "Error effect: " ++ err
@@ -172,7 +190,7 @@ spec = do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) toolCallResponseBody $ do
         let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model GLM45 OpenAI)]
             configs = [Streaming True] :: [ModelConfig (Model GLM45 OpenAI)]
-        queryLLM configs msgs
+        queryStreamingLLM configs msgs
 
       case result of
         Left err -> fail $ "Error effect: " ++ err
@@ -188,7 +206,7 @@ spec = do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) reasoningOnlyBody $ do
         let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model GLM45 OpenAI)]
             configs = [Streaming True, Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
-        queryLLM configs msgs
+        queryStreamingLLM configs msgs
 
       case result of
         Left err -> fail $ "Error effect: " ++ err
@@ -201,7 +219,7 @@ spec = do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) reasoningWithToolsBody $ do
         let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model GLM45 OpenAI)]
             configs = [Streaming True, Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
-        queryLLM configs msgs
+        queryStreamingLLM configs msgs
 
       case result of
         Left err -> fail $ "Error effect: " ++ err
@@ -218,7 +236,7 @@ spec = do
       result <- testRunner glm45ComposableProvider (Model GLM45 OpenAI) reasoningOnlyBody $ do
         let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model GLM45 OpenAI)]
             configs = [Streaming True, Reasoning True] :: [ModelConfig (Model GLM45 OpenAI)]
-        queryLLM configs msgs
+        queryStreamingLLM configs msgs
 
       case result of
         Left err -> fail $ "Error effect: " ++ err

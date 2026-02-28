@@ -72,6 +72,7 @@ library
         Runix.Bash,
         Runix.Cmd,
         Runix.Streaming,
+        Runix.StreamChunk,
         Runix.Streaming.SSE,
         Runix.Streaming.SSE.Conduit,
         Runix.HTTP,

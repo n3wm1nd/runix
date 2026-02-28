@@ -19,8 +19,10 @@ module Runix.LLM.Interpreter
     -- ** LLMStream interpreter (new streaming architecture)
   , interpretLLMStream
   , startLLMStream
+  , queryStreamingLLM
     -- ** Convenience (bundles restapiHTTP, for tests etc.)
   , interpretLLMWith
+  , interpretLLMStreamingWith
     -- * Protocol typeclass
   , ProviderProtocol(..)
     -- * Cancellation wrapper
@@ -44,26 +46,27 @@ module Runix.LLM.Interpreter
 
 import Polysemy
 import Polysemy.Fail
-import Polysemy.State (State, evalState, get, put, modify)
+import Polysemy.State (State, evalState, get, put)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson (Value, encode, eitherDecodeStrict)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.ByteString as BS
 import Data.Default (Default, def)
-import qualified Data.Map.Strict as Data.Map
 
 import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..), oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..))
-import Runix.LLMStream (LLMStream(..), LLMStreamResult(..), StreamEvent(..), StreamId(..), fetchStreamEvent, cancelLLMStream)
-import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming(..), HTTPStreamedResult(..), ConnectionId(..), httpRequestStreaming, fetchChunk, cancelStream)
+import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
+import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming)
+import qualified Runix.Streaming as Streaming
+import Runix.Streaming (interpretStreamingStateful)
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
 import Runix.Cancellation (Cancellation, onCancellation)
-import Runix.Streaming.SSE (StreamingContent(..), extractContentFromChunk)
+import Runix.Streaming.SSE (StreamingContent(..), extractContentFromChunk, parseSSE)
+import qualified Data.ByteString.Lazy as BSL
 import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
 
@@ -167,23 +170,18 @@ interpretLLM composableProvider model action =
 
 -- | Internal state for an active LLM stream
 data LLMStreamState model s = LLMStreamState
-    { streamEventBuffer :: [StreamEvent]
-    , streamAccumulatedResponse :: ProviderResponse model  -- Accumulated response being built
+    { streamHTTPStreamId :: Streaming.StreamId  -- HTTP stream ID for this LLM stream
+    , streamEventBuffer :: [StreamEvent]  -- Buffered events from current chunk
+    , streamAccumulatedResponse :: ProviderResponse model  -- Accumulated response
     , streamStackState :: s
-    , streamConnectionId :: ConnectionId  -- HTTP connection for this stream
-    , streamConfigs :: [ModelConfig model]  -- Original configs for this stream
+    , streamConfigs :: [ModelConfig model]
+    , streamModel :: model
     }
 
--- | State for managing active streams
-data LLMStreamsState model s = LLMStreamsState
-    { nextStreamId :: Int
-    , activeStreams :: Data.Map.Map StreamId (LLMStreamState model s)
-    }
-
--- | LLMStream interpreter - provides the LLMStream effect via HTTPStreaming
+-- | LLMStream interpreter - provides LLM streaming via HTTPStreaming
 --
--- This is the interpreter that handles LLMStream operations by managing
--- streaming state and delegating to HTTPStreaming.
+-- Uses interpretStreamingStateful to manage stream state.
+-- Fetches HTTP chunks, parses SSE, extracts events, accumulates responses.
 interpretLLMStream :: forall p model s r a.
                       ( ModelName model
                       , HasCodec (ProviderRequest model)
@@ -196,125 +194,94 @@ interpretLLMStream :: forall p model s r a.
                    => p
                    -> ComposableProvider model s
                    -> model
-                   -> Sem (LLMStream model : r) a
+                   -> Sem (LLMStreaming model : r) a
                    -> Sem r a
 interpretLLMStream api composableProvider model action =
     evalState (model, def @s) $
-    evalState (LLMStreamsState 0 mempty :: LLMStreamsState model s) $
-    interpret (\case
-        StartLLMStreamInternal configs messages -> runFail $ do
-            (m, stackState) <- get @(model, s)
-
-            -- Build the provider request
-            let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
-                requestValue = encode $ toJSONViaCodec request
-                httpReq = HTTPRequest
-                    { method = "POST"
-                    , uri = apiroot api <> "/" <> case protocolEndpoint @(ProviderResponse model) of Endpoint p -> p
-                    , headers = authheaders api ++ [("Content-Type", "application/json")]
-                    , body = Just requestValue
-                    }
-
-            put (m, stackState')
-
-            -- Forward to HTTPStreaming to start the request
-            result <- raise $ raise $ send (HttpRequestStreaming httpReq)
-            case result of
-                Left err -> fail err
-                Right connId -> do
-                    -- Allocate new StreamId and associate with ConnectionId
-                    streamsState <- get @(LLMStreamsState model s)
-                    let streamId = StreamId (nextStreamId streamsState)
-                        initialStreamState = LLMStreamState
-                            { streamEventBuffer = []
-                            , streamAccumulatedResponse = emptyStreamingResponse @(ProviderResponse model)
-                            , streamStackState = stackState'
-                            , streamConnectionId = connId
-                            , streamConfigs = configs
-                            }
-                    put $ streamsState
-                        { nextStreamId = nextStreamId streamsState + 1
-                        , activeStreams = Data.Map.insert streamId initialStreamState (activeStreams streamsState)
-                        }
-                    return streamId
-
-        FetchStreamEventInternal streamId -> fetchEventForStream streamId
-
-        GetAccumulatedResult streamId -> do
-            (m, _) <- get @(model, s)
-            streamsState <- get @(LLMStreamsState model s)
-            case Data.Map.lookup streamId (activeStreams streamsState) of
-                Nothing -> return $ Left "Stream not found"
-                Just streamState -> do
-                    -- Use composableProvider to convert accumulated response to messages
-                    case fromProviderResponse composableProvider m (streamConfigs streamState)
-                            (streamStackState streamState)
-                            (streamAccumulatedResponse streamState) of
-                        Left err -> return $ Left $ "Failed to parse accumulated response: " ++ show err
-                        Right (_stackState', messages) -> return $ Right messages
-
-        CancelLLMStreamInternal streamId -> do
-            streamsState <- get @(LLMStreamsState model s)
-            case Data.Map.lookup streamId (activeStreams streamsState) of
-                Nothing -> return ()
-                Just streamState -> do
-                    -- Close the HTTP connection
-                    raise $ raise $ send (CloseConnectionInternal (streamConnectionId streamState))
-                    -- Remove from active streams
-                    modify $ \ss -> ss { activeStreams = Data.Map.delete streamId (activeStreams ss) }
-
-    ) (raiseUnder @(State (LLMStreamsState model s)) $ raiseUnder @(State (model, s)) action)
+    interpretStreamingStateful onStart onFetch onClose $
+    raiseUnder @(State (model, s)) action
   where
     contentToEvent :: StreamingContent -> StreamEvent
     contentToEvent (StreamingText txt) = StreamText txt
     contentToEvent (StreamingReasoning txt) = StreamThinking txt
 
-    fetchEventForStream :: Members '[State (LLMStreamsState model s), State (model, s), HTTPStreaming, Fail] r' => StreamId -> Sem r' (Maybe StreamEvent)
-    fetchEventForStream streamId = do
-        streamsState <- get @(LLMStreamsState model s)
-        case Data.Map.lookup streamId (activeStreams streamsState) of
-            Nothing -> return Nothing  -- Stream closed
-            Just streamState -> do
-                -- Check buffer first
-                case streamEventBuffer streamState of
-                    (event:rest) -> do
-                        modify $ \ss -> ss { activeStreams =
-                            Data.Map.insert streamId (streamState { streamEventBuffer = rest }) (activeStreams ss) }
-                        return $ Just event
-                    [] -> do
-                        -- Fetch next HTTP chunk using the tracked ConnectionId
-                        mChunk <- send (FetchChunkInternal (streamConnectionId streamState))
-                        case mChunk of
-                            Nothing -> return Nothing  -- HTTP stream ended
-                            Just chunk -> do
-                                -- Extract streaming content from SSE chunk
-                                let contents = extractContentFromChunk chunk
-                                    events = map contentToEvent contents
+    -- Initialize: Build HTTP request and start HTTP stream
+    onStart (configs, messages) = do
+        (m, stackState) <- get @(model, s)
 
-                                -- Also parse chunk as JSON Value and merge into accumulated response
-                                -- (SSE format has data: lines with JSON deltas)
-                                let accumulated' = case eitherDecodeStrict chunk of
-                                        Left _err -> streamAccumulatedResponse streamState  -- Keep old if parse fails
-                                        Right (delta :: Value) ->
-                                            mergeStreamingDelta @(ProviderResponse model)
-                                                (streamAccumulatedResponse streamState) delta
+        -- Build the provider request
+        let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
+            requestValue = encode $ toJSONViaCodec request
+            httpReq = HTTPRequest
+                { method = "POST"
+                , uri = apiroot api <> "/" <> case protocolEndpoint @(ProviderResponse model) of Endpoint p -> p
+                , headers = authheaders api ++ [("Content-Type", "application/json")]
+                , body = Just requestValue
+                }
 
-                                case events of
-                                    [] -> do
-                                        -- Update accumulated response but no events to emit
-                                        modify $ \ss -> ss { activeStreams =
-                                            Data.Map.insert streamId
-                                                (streamState { streamAccumulatedResponse = accumulated' })
-                                                (activeStreams ss) }
-                                        fetchEventForStream streamId  -- Recursively fetch next
-                                    (event:rest) -> do
-                                        -- Update state with new accumulation and buffered events
-                                        modify $ \ss -> ss { activeStreams =
-                                            Data.Map.insert streamId
-                                                (streamState { streamEventBuffer = rest
-                                                            , streamAccumulatedResponse = accumulated' })
-                                                (activeStreams ss) }
-                                        return $ Just event
+        put (m, stackState')
+
+        -- Start HTTP stream
+        result <- raise $ send (Streaming.StartStream httpReq)
+        case result of
+            Left err -> return $ Left err
+            Right httpStreamId -> do
+                let initialStreamState = LLMStreamState
+                        { streamEventBuffer = []
+                        , streamAccumulatedResponse = emptyStreamingResponse @(ProviderResponse model)
+                        , streamStackState = stackState'
+                        , streamHTTPStreamId = httpStreamId
+                        , streamConfigs = configs
+                        , streamModel = m
+                        }
+                return $ Right initialStreamState
+
+    -- Fetch: Get next event, parsing HTTP chunks as needed
+    onFetch streamState = do
+        -- Check buffer first
+        case streamEventBuffer streamState of
+            (event:rest) -> do
+                return (Just event, streamState { streamEventBuffer = rest })
+            [] -> do
+                -- Fetch next HTTP chunk using the tracked HTTP StreamId
+                mChunk <- send (Streaming.FetchItem (streamHTTPStreamId streamState))
+                case mChunk of
+                    Nothing -> return (Nothing, streamState)  -- HTTP stream ended
+                    Just chunk -> do
+                        -- Extract streaming content from SSE chunk
+                        let contents = extractContentFromChunk chunk
+                            events = map contentToEvent contents
+
+                        -- Parse SSE chunk to get JSON deltas and merge into accumulated response
+                        let chunkLazy = BSL.fromStrict chunk
+                            deltas = parseSSE chunkLazy
+                            accumulated' = foldl (mergeStreamingDelta @(ProviderResponse model))
+                                                 (streamAccumulatedResponse streamState)
+                                                 deltas
+
+                        case events of
+                            [] -> do
+                                -- Update accumulated response but no events to emit, recursively fetch next
+                                onFetch (streamState { streamAccumulatedResponse = accumulated' })
+                            (event:rest) -> do
+                                -- Update state with new accumulation and buffered events
+                                let streamState' = streamState
+                                        { streamEventBuffer = rest
+                                        , streamAccumulatedResponse = accumulated'
+                                        }
+                                return (Just event, streamState')
+
+    -- Close: Convert accumulated response to messages
+    onClose streamState = do
+        (m, _) <- get @(model, s)
+        -- Close the HTTP stream
+        _ <- raise $ send (Streaming.CloseStream (streamHTTPStreamId streamState))
+        -- Use composableProvider to convert accumulated response to messages
+        case fromProviderResponse composableProvider m (streamConfigs streamState)
+                (streamStackState streamState)
+                (streamAccumulatedResponse streamState) of
+            Left err -> return $ Left $ "Failed to parse accumulated response: " ++ show err
+            Right (_stackState', messages) -> return $ Right messages
 
 -- | Start an LLM streaming request
 --
@@ -325,45 +292,33 @@ interpretLLMStream api composableProvider model action =
 -- - Returns both the action result and the accumulated messages
 -- - Automatically cleans up when done
 startLLMStream :: forall model r a.
-                  Members '[LLMStream model, Fail] r
+                  Members '[LLMStreaming model, Fail] r
                => [ModelConfig model]
                -> [Message model]
                -> Sem (LLMStreamResult model : r) a
                -> Sem r (a, Either String [Message model])
-startLLMStream configs messages action = do
-    -- Start the stream, get StreamId
-    result <- send (StartLLMStreamInternal configs messages)
-    case result of
+startLLMStream configs messages = Streaming.startStream (configs, messages)
+
+-- | Convenience function that streams an LLM request and returns the accumulated messages
+--
+-- This consumes all streaming events and returns just the final accumulated messages.
+-- Use this when you want to use streaming transport (SSE) but don't need real-time events.
+queryStreamingLLM :: forall model r.
+                     Members '[LLMStreaming model, Fail] r
+                  => [ModelConfig model]
+                  -> [Message model]
+                  -> Sem r [Message model]
+queryStreamingLLM configs messages = do
+    ((), messagesResult) <- startLLMStream configs messages $ do
+        let consumeEvents = do
+              mEvent <- Streaming.fetchNext @StreamEvent
+              case mEvent of
+                Nothing -> return ()
+                Just _ -> consumeEvents
+        consumeEvents
+    case messagesResult of
         Left err -> fail err
-        Right streamId -> do
-            -- Interpret LLMStreamResult by forwarding to LLMStream with streamId
-            -- Also manage event buffering via State
-            actionResult <- evalState ([] :: [StreamEvent]) $
-              interpret (\case
-                  FetchStreamEvent -> fetchNext streamId
-                  CancelLLMStream -> raise $ send (CancelLLMStreamInternal streamId)
-              ) (raiseUnder @(State [StreamEvent]) action)
-
-            -- Get the accumulated result
-            accumulated <- send (GetAccumulatedResult streamId)
-
-            -- Clean up
-            send (CancelLLMStreamInternal streamId)
-
-            return (actionResult, accumulated)
-  where
-    fetchNext :: Member (LLMStream model) r' => Member (State [StreamEvent]) r' => StreamId -> Sem r' (Maybe StreamEvent)
-    fetchNext streamId = do
-        -- Check buffer first
-        buffer <- get @[StreamEvent]
-        case buffer of
-            (event:rest) -> do
-                put rest
-                return $ Just event
-            [] -> do
-                -- Buffer empty, need to fetch and parse more
-                -- Forward to LLMStream interpreter which handles HTTP fetching
-                send (FetchStreamEventInternal streamId)
+        Right msgs -> return msgs
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -459,6 +414,24 @@ interpretLLMWith api composableProvider model action =
     interpretLLM @p composableProvider model $
     raiseUnder @(RestAPI p)
     action
+
+-- | Streaming convenience interpreter.
+interpretLLMStreamingWith :: forall p model s r a.
+                             ( ModelName model
+                             , HasCodec (ProviderRequest model)
+                             , Monoid (ProviderRequest model)
+                             , ProviderProtocol (ProviderResponse model)
+                             , RestEndpoint p
+                             , Default s
+                             , Members '[HTTPStreaming, Fail] r
+                             )
+                          => p
+                          -> ComposableProvider model s
+                          -> model
+                          -> Sem (LLMStreaming model : r) a
+                          -> Sem r a
+interpretLLMStreamingWith api composableProvider model action =
+    interpretLLMStream api composableProvider model action
 
 -- ============================================================================
 -- Cancellable Wrapper

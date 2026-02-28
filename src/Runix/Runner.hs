@@ -26,7 +26,7 @@ module Runix.Runner (
     module Runix.Logging,
     module Runix.Secret,
     module Runix.Compiler,
-    module Runix.Streaming,
+    module Runix.StreamChunk,
     Coding
 ) where
 
@@ -47,7 +47,7 @@ import Runix.HTTP
 import Runix.Logging
 import Runix.Secret
 import Runix.Compiler
-import Runix.Streaming
+import Runix.StreamChunk
 import Runix.Cancellation (Cancellation, cancelNoop)
 import qualified Runix.Compiler.Compiler as Compiler
 import Runix.LLM.Interpreter (OpenRouter(..), GenericModel(..), OpenRouterAuth(..), interpretLLM)

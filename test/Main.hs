@@ -31,14 +31,17 @@ import UniversalLLM.Protocols.Anthropic (AnthropicResponse)
 import Autodocodec (HasCodec)
 import Data.Default (Default)
 
-import Runix.LLM.Interpreter (AnthropicOAuthAuth(..))
-import Runix.LLM.Interpreter (interpretLLMStreamingWith)
+import Runix.LLM.Interpreter (AnthropicOAuthAuth(..), ProviderProtocol)
+import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
-import Runix.HTTP (HTTP, HTTPStreaming, HTTPResponse(..))
+import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
+import Runix.Streaming (fetchNext)
+import Runix.HTTP (HTTP, HTTPRequest, HTTPStreaming, HTTPResponse(..))
 import qualified Runix.HTTP as HTTPEff
 import Runix.Logging (Logging, loggingNull)
 import Runix.Cancellation (Cancellation, cancelNoop)
-import Runix.Streaming (StreamChunk, ignoreChunks)
+import Runix.StreamChunk (StreamChunk, ignoreChunks)
+import Runix.Streaming (interpretStreamingStateful)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
 import qualified FileSystemSecuritySpec
@@ -89,20 +92,35 @@ claudeSonnet45ComposableProvider = withReasoning `chainProviders` withTools `cha
 
 -- Mock HTTP effect that uses cached SSE responses from test fixtures
 -- SSE responses come from real Anthropic API calls recorded in universal-llm tests
-mockHTTP :: BSL.ByteString -> Members '[Logging, Embed IO] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
-mockHTTP sseBody = interpretH (\case
-  HTTPEff.HttpRequestStreaming _req _callback _cancelCheck -> do
-    -- Streaming: return the cached SSE response (mock ignores callback/cancel)
-    pureT $ Right $ HTTPResponse
-      200
-      [("content-type", "text/event-stream")]
-      sseBody) . interpret (\case
-    HTTPEff.HttpRequest _ -> do
-      -- Non-streaming: return success with empty response (not tested in these tests)
-      return $ Right $ HTTPResponse
-        200
-        [("content-type", "application/json")]
-        "{\"id\":\"mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-5-20250929\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}")
+mockHTTP :: forall r a. BSL.ByteString -> Members '[Logging, Embed IO, Fail] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
+mockHTTP sseBody =
+    -- First interpret HTTPStreaming (which is Streaming BS.ByteString () HTTPRequest)
+    interpretStreamingStateful onStart onFetch onClose
+    -- Then interpret HTTP (non-streaming)
+    . interpret @HTTP (\case
+        HTTPEff.HttpRequest _ -> do
+          -- Non-streaming: return success with empty response (not tested in these tests)
+          return $ Right $ HTTPResponse
+            200
+            [("content-type", "application/json")]
+            "{\"id\":\"mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-5-20250929\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}")
+  where
+    -- Convert lazy ByteString to chunks of strict ByteStrings
+    chunks :: [BS.ByteString]
+    chunks = BSL.toChunks sseBody
+
+    -- Stream state: just the list of remaining chunks
+    onStart :: HTTPRequest -> Sem r (Either String [BS.ByteString])
+    onStart _req = return $ Right chunks
+
+    -- Fetch next chunk
+    onFetch :: [BS.ByteString] -> Sem r (Maybe BS.ByteString, [BS.ByteString])
+    onFetch [] = return (Nothing, [])
+    onFetch (c:cs) = return (Just c, cs)
+
+    -- Close: return unit
+    onClose :: [BS.ByteString] -> Sem r ()
+    onClose _ = return ()
 
 -- ============================================================================
 -- Test Runner
@@ -110,11 +128,11 @@ mockHTTP sseBody = interpretH (\case
 
 -- Reusable test runner that composes all effect interpreters for testing
 -- with mocked HTTP effect provider (generic over model type).
-testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), HasCodec (ProviderResponse model), Monoid (ProviderRequest model), ProviderResponse model ~ AnthropicResponse)
+testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), Monoid (ProviderRequest model), ProviderProtocol (ProviderResponse model), ProviderResponse model ~ AnthropicResponse)
            => ComposableProvider model s
            -> model
            -> BSL.ByteString
-           -> (forall r . Members '[LLM model, Fail] r => Sem r a)
+           -> (forall r . Members '[LLMStreaming model, Fail] r => Sem r a)
            -> IO (Either String (Either String a))
 testRunner composableProvider model sseBody action =
   runM
@@ -172,7 +190,7 @@ main = do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) textResponseBody $ do
           let msgs = [UserText "Hello"] :: [Message (Model ClaudeSonnet45 Anthropic)]
               configs = [Streaming True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
-          queryLLM configs msgs
+          queryStreamingLLM configs msgs
 
         case result of
           Left err -> fail $ "Error effect: " ++ err
@@ -188,7 +206,7 @@ main = do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) toolCallResponseBody $ do
           let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
               configs = [Streaming True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
-          queryLLM configs msgs
+          queryStreamingLLM configs msgs
 
         case result of
           Left err -> fail $ "Error effect: " ++ err
@@ -220,7 +238,7 @@ main = do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingOnlyBody $ do
           let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
               configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
-          queryLLM configs msgs
+          queryStreamingLLM configs msgs
 
         case result of
           Left err -> fail $ "Error effect: " ++ err
@@ -234,7 +252,7 @@ main = do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingWithToolsBody $ do
           let msgs = [UserText "What's the weather in Paris?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
               configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
-          queryLLM configs msgs
+          queryStreamingLLM configs msgs
 
         case result of
           Left err -> fail $ "Error effect: " ++ err
@@ -251,7 +269,7 @@ main = do
         result <- testRunner claudeSonnet45ComposableProvider (Model ClaudeSonnet45 Anthropic) thinkingOnlyBody $ do
           let msgs = [UserText "Solve this puzzle: What has cities but no houses, forests but no trees, and water but no fish?"] :: [Message (Model ClaudeSonnet45 Anthropic)]
               configs = [Streaming True, Reasoning True] :: [ModelConfig (Model ClaudeSonnet45 Anthropic)]
-          queryLLM configs msgs
+          queryStreamingLLM configs msgs
 
         case result of
           Left err -> fail $ "Error effect: " ++ err

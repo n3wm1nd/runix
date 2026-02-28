@@ -30,6 +30,7 @@ import qualified Control.Monad.Catch as CMC
 import Data.CaseInsensitive (original)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro, responseBody)
 import Runix.Logging (Logging, info)
+import Runix.Streaming (Streaming(..), StreamResult(..), StreamId(..), fetchNext, startStream, interpretStreamingStateful)
 import Conduit
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
@@ -62,53 +63,24 @@ httpRequest req = do
         Left err -> fail err
 
 
--- | Connection identifier for HTTP streaming
-newtype ConnectionId = ConnectionId Int
-    deriving (Eq, Ord, Show)
+-- | HTTP streaming effect
+-- Streams ByteString chunks, returns () when closed (TODO: capture status/headers)
+type HTTPStreaming = Streaming BS.ByteString () HTTPRequest
 
--- | Internal HTTP streaming effect for managing connections
--- Users don't interact with this directly - use HTTPStreamedResult instead
-data HTTPStreaming (m :: Type -> Type) a where
-    HttpRequestStreaming :: HTTPRequest
-                         -> HTTPStreaming m (Either String ConnectionId)
-    FetchChunkInternal :: ConnectionId
-                       -> HTTPStreaming m (Maybe BS.ByteString)
-    CloseConnectionInternal :: ConnectionId
-                            -> HTTPStreaming m ()
+-- | Public result type for HTTP streaming
+type HTTPStreamedResult = StreamResult BS.ByteString
 
--- | Public effect for consuming HTTP streams
--- Provided by httpRequestStreaming which manages the connection lifecycle
-data HTTPStreamedResult (m :: Type -> Type) a where
-    FetchChunk :: HTTPStreamedResult m (Maybe BS.ByteString)
-    CancelStream :: HTTPStreamedResult m ()
-
+-- | Convenience accessor for fetchNext
 fetchChunk :: Member HTTPStreamedResult r => Sem r (Maybe BS.ByteString)
-fetchChunk = send FetchChunk
-
-cancelStream :: Member HTTPStreamedResult r => Sem r ()
-cancelStream = send CancelStream
+fetchChunk = fetchNext
 
 -- | Make a streaming HTTP request with bracket-style resource management
--- Provides HTTPStreamedResult effect for the duration of the action
--- Automatically cleans up the connection when done
+-- Returns the action result and () (TODO: return status code and headers)
 httpRequestStreaming :: forall r a. (Members '[HTTPStreaming, Fail] r)
                      => HTTPRequest
                      -> Sem (HTTPStreamedResult : r) a
-                     -> Sem r a
-httpRequestStreaming req action = do
-    -- Start the stream, get ConnectionId
-    result <- send (HttpRequestStreaming req)
-    case result of
-        Left err -> fail err
-        Right connId -> do
-            -- Interpret HTTPStreamedResult by forwarding to HTTPStreaming with connId
-            res <- interpret (\case
-                FetchChunk -> send (FetchChunkInternal connId)
-                CancelStream -> send (CloseConnectionInternal connId)
-                ) action
-            -- Clean up connection (idempotent)
-            send (CloseConnectionInternal connId)
-            return res
+                     -> Sem r (a, ())
+httpRequestStreaming = startStream
               
 
 
@@ -140,68 +112,50 @@ httpIO requestTransform = interpret $ \case
 
 
 -- | HTTP streaming interpreter with connection management via STM
--- Maintains a map of ConnectionId -> TQueue for active streams
-httpIOStreaming :: forall r a. (HasCallStack, Member (Embed IO) r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
-httpIOStreaming requestTransform action = do
-    -- Create the connection map
-    connectionsMap <- embed $ newTVarIO (mempty :: Data.Map.Map ConnectionId (TQueue (Maybe BS.ByteString)))
-    nextIdVar <- embed $ newTVarIO (0 :: Int)
+-- Uses interpretStreamingStateful helper to manage stream state
+httpIOStreaming :: forall r a. (HasCallStack, Members '[Embed IO, Fail] r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreaming requestTransform =
+    interpretStreamingStateful onStart onFetch onClose
+  where
+    -- Initialize: Create TQueue and fork HTTP request thread
+    onStart request = do
+        chunkQueue <- embed $ newTQueueIO
 
-    -- Interpret the HTTPStreaming effect
-    interpret (\case
-        HttpRequestStreaming request -> do
-            -- Allocate new ConnectionId and queue
-            (connId, chunkQueue) <- embed $ atomically $ do
-                nextId <- readTVar nextIdVar
-                writeTVar nextIdVar (nextId + 1)
-                let connId = ConnectionId nextId
-                queue <- newTQueue
-                modifyTVar connectionsMap (Data.Map.insert connId queue)
-                return (connId, queue)
+        -- Fork thread to make HTTP request and fill the queue
+        _ <- embed $ forkIO $ do
+            result <- CMC.try (parseRequest request.uri)
+            case result of
+                Left (_ :: CMC.SomeException) -> do
+                    -- Signal error and end
+                    atomically $ writeTQueue chunkQueue Nothing
+                Right req -> do
+                    let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
+                    let hr :: Request =
+                            setRequestMethod (fromString request.method) .
+                            setRequestHeaders hdrs .
+                            requestTransform .
+                            case request.body of
+                                Just b -> setRequestBody (RequestBodyLBS b)
+                                Nothing -> id
+                            $ req
 
-            -- Fork thread to make HTTP request and fill the queue
-            _ <- embed $ forkIO $ do
-                result <- CMC.try (parseRequest request.uri)
-                case result of
-                    Left (_ :: CMC.SomeException) -> do
-                        -- Signal error and end
+                    -- Make the request and write chunks to queue as they arrive
+                    withResponse hr $ \respFull -> do
+                        runConduit $
+                            responseBody respFull
+                            .| awaitForever (\chunk -> liftIO $ atomically $ writeTQueue chunkQueue (Just chunk))
+                        -- Signal end of stream
                         atomically $ writeTQueue chunkQueue Nothing
-                    Right req -> do
-                        let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
-                        let hr :: Request =
-                                setRequestMethod (fromString request.method) .
-                                setRequestHeaders hdrs .
-                                requestTransform .
-                                case request.body of
-                                    Just b -> setRequestBody (RequestBodyLBS b)
-                                    Nothing -> id
-                                $ req
 
-                        -- Make the request and write chunks to queue as they arrive
-                        withResponse hr $ \respFull -> do
-                            runConduit $
-                                responseBody respFull
-                                .| awaitForever (\chunk -> liftIO $ atomically $ writeTQueue chunkQueue (Just chunk))
-                            -- Signal end of stream
-                            atomically $ writeTQueue chunkQueue Nothing
+        return $ Right chunkQueue
 
-            return $ Right connId
+    -- Fetch: Read from TQueue
+    onFetch queue = do
+        mChunk <- embed $ atomically $ readTQueue queue
+        return (mChunk, queue)  -- Queue is unchanged
 
-        FetchChunkInternal connId -> do
-            -- Look up the queue for this connection
-            mQueue <- embed $ atomically $ do
-                conns <- readTVar connectionsMap
-                return $ Data.Map.lookup connId conns
-
-            case mQueue of
-                Nothing -> return Nothing  -- Connection already closed
-                Just queue -> embed $ atomically $ readTQueue queue
-
-        CloseConnectionInternal connId -> do
-            -- Remove connection from map (idempotent)
-            embed $ atomically $ modifyTVar connectionsMap (Data.Map.delete connId)
-
-        ) action
+    -- Close: Nothing to do (queue will be garbage collected)
+    onClose _queue = return ()  -- TODO: Return status code and headers
 
 -- | Convenience function - httpIO with no request transformation
 httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a

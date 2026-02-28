@@ -20,18 +20,14 @@
 -- For standard request/response, use the 'LLM' effect instead.
 module Runix.LLMStream
   ( -- * Effects
-    LLMStream(..)
-  , LLMStreamResult(..)
-  , fetchStreamEvent
-  , cancelLLMStream
-  , StreamId(..)
+    LLMStreaming
+  , LLMStreamResult
     -- * Streaming events
   , StreamEvent(..)
   ) where
 
-import Polysemy
-import Data.Kind (Type)
 import Data.Text (Text)
+import Runix.Streaming (Streaming, StreamResult)
 
 -- Re-export universal-llm types
 import UniversalLLM (Message(..), ModelConfig(..))
@@ -51,33 +47,12 @@ data StreamEvent
   | StreamDone                       -- ^ Stream completed normally
   deriving (Show, Eq)
 
--- | Stream identifier for LLM streaming
-newtype StreamId = StreamId Int
-    deriving (Eq, Ord, Show)
 
--- | Internal LLM streaming effect for managing streams
--- Users don't interact with this directly - use LLMStreamResult instead
-data LLMStream model (m :: Type -> Type) a where
-    StartLLMStreamInternal :: [ModelConfig model]
-                           -> [Message model]
-                           -> LLMStream model m (Either String StreamId)
-    FetchStreamEventInternal :: StreamId
-                             -> LLMStream model m (Maybe StreamEvent)
-    GetAccumulatedResult :: StreamId
-                         -> LLMStream model m (Either String [Message model])
-    CancelLLMStreamInternal :: StreamId
-                            -> LLMStream model m ()
+-- | LLM streaming using the generic Streaming abstraction
+-- Streams: StreamEvent
+-- Returns: Either String [Message model] (accumulated messages)
+-- Config: ([ModelConfig model], [Message model])
+type LLMStreaming model = Streaming StreamEvent (Either String [Message model]) ([ModelConfig model], [Message model])
 
--- | Public effect for consuming LLM streams
--- Provided by startLLMStream which manages the stream lifecycle
-data LLMStreamResult model (m :: Type -> Type) a where
-    FetchStreamEvent :: LLMStreamResult model m (Maybe StreamEvent)
-    CancelLLMStream :: LLMStreamResult model m ()
-
--- | Fetch the next stream event
-fetchStreamEvent :: Member (LLMStreamResult model) r => Sem r (Maybe StreamEvent)
-fetchStreamEvent = send FetchStreamEvent
-
--- | Cancel the current stream
-cancelLLMStream :: Member (LLMStreamResult model) r => Sem r ()
-cancelLLMStream = send CancelLLMStream
+-- | Public result type for LLM streaming
+type LLMStreamResult model = StreamResult StreamEvent
