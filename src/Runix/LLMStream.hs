@@ -7,59 +7,77 @@
 
 -- | LLM streaming effect for interactive/abortable generation.
 --
--- Returns raw SSE-formatted chunks from the LLM provider. Caller is responsible
--- for parsing, reassembly, and interpretation. Use this when you need:
+-- Returns structured, protocol-agnostic streaming events. Events represent
+-- what's happening in the stream (thinking, text generation, tool calls, etc.)
+-- independent of the provider's wire format.
+--
+-- Use this when you need:
 --
 -- * Interactive generation (display tokens as they arrive)
 -- * Abort capability (stop mid-generation, keep partial results)
--- * Custom processing (handle chunks yourself)
+-- * Real-time event handling (thinking, tool calls, etc.)
 --
 -- For standard request/response, use the 'LLM' effect instead.
 module Runix.LLMStream
-  ( LLMStream(..)
-  , startStream
+  ( -- * Effects
+    LLMStream(..)
+  , LLMStreamResult(..)
+  , fetchStreamEvent
+  , cancelLLMStream
+  , StreamId(..)
+    -- * Streaming events
+  , StreamEvent(..)
   ) where
 
 import Polysemy
 import Data.Kind (Type)
-import qualified Data.ByteString as BS
-import Conduit (ConduitT)
+import Data.Text (Text)
 
 -- Re-export universal-llm types
 import UniversalLLM (Message(..), ModelConfig(..))
 
--- | LLM streaming effect - returns raw chunk source
+-- | Events that occur during LLM streaming
 --
--- Returns a conduit source of SSE-formatted bytes from the provider.
--- Stopping consumption of the source can trigger request cancellation.
-data LLMStream model (m :: Type -> Type) a where
-    StartStream :: [ModelConfig model]                    -- ^ Configuration (temperature, etc.)
-                -> [Message model]                         -- ^ Messages to send
-                -> LLMStream model m (ConduitT () BS.ByteString IO (), Int, [(String, String)])
-                -- ^ (chunk source, status code, response headers)
+-- Protocol-agnostic representation of what's happening in the stream.
+-- These map to provider-specific formats but hide those details.
+data StreamEvent
+  = StreamStarted                    -- ^ Stream has begun
+  | StreamText Text                  -- ^ Assistant text chunk
+  | StreamThinking Text              -- ^ Reasoning/thinking chunk
+  | StreamToolCallStarted Text Text  -- ^ Tool call started (id, name)
+  | StreamToolCallArgument Text Text -- ^ Tool call argument chunk (id, partial args)
+  | StreamToolCallComplete Text      -- ^ Tool call finished (id)
+  | StreamError Text                 -- ^ Error occurred
+  | StreamDone                       -- ^ Stream completed normally
+  deriving (Show, Eq)
 
--- | Start a streaming LLM request
---
--- Returns:
--- * A conduit source of raw bytes (SSE format)
--- * HTTP status code
--- * Response headers
---
--- The source yields chunks as they arrive from the provider. To consume:
---
--- @
--- (source, code, headers) <- startStream configs messages
--- runConduit $ source .| mapM_C processChunk
--- @
---
--- Or to parse SSE and extract content:
---
--- @
--- (source, _, _) <- startStream configs messages
--- runConduit $ source .| parseSSE .| extractContent .| sinkList
--- @
-startStream :: Member (LLMStream model) r
-            => [ModelConfig model]
-            -> [Message model]
-            -> Sem r (ConduitT () BS.ByteString IO (), Int, [(String, String)])
-startStream configs messages = send (StartStream configs messages)
+-- | Stream identifier for LLM streaming
+newtype StreamId = StreamId Int
+    deriving (Eq, Ord, Show)
+
+-- | Internal LLM streaming effect for managing streams
+-- Users don't interact with this directly - use LLMStreamResult instead
+data LLMStream model (m :: Type -> Type) a where
+    StartLLMStreamInternal :: [ModelConfig model]
+                           -> [Message model]
+                           -> LLMStream model m (Either String StreamId)
+    FetchStreamEventInternal :: StreamId
+                             -> LLMStream model m (Maybe StreamEvent)
+    GetAccumulatedResult :: StreamId
+                         -> LLMStream model m (Either String [Message model])
+    CancelLLMStreamInternal :: StreamId
+                            -> LLMStream model m ()
+
+-- | Public effect for consuming LLM streams
+-- Provided by startLLMStream which manages the stream lifecycle
+data LLMStreamResult model (m :: Type -> Type) a where
+    FetchStreamEvent :: LLMStreamResult model m (Maybe StreamEvent)
+    CancelLLMStream :: LLMStreamResult model m ()
+
+-- | Fetch the next stream event
+fetchStreamEvent :: Member (LLMStreamResult model) r => Sem r (Maybe StreamEvent)
+fetchStreamEvent = send FetchStreamEvent
+
+-- | Cancel the current stream
+cancelLLMStream :: Member (LLMStreamResult model) r => Sem r ()
+cancelLLMStream = send CancelLLMStream
