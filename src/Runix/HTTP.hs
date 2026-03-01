@@ -177,34 +177,42 @@ withHeaders modifyRequest = intercept $ \case
         info $ fromString "intercepted request"
         send $ HttpRequest (modifyRequest request)
 
--- TODO: Fix these interceptors
-{-
 -- | Reinterpreter for HTTPStreaming with header support
-withStreamingHeaders :: Members [Fail, Logging, HTTPStreaming] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
-withStreamingHeaders modifyRequest action = interceptH (\case
-    HttpRequestStreaming request callback -> do
-        raise $ info $ fromString "intercepted streaming request"
-        runTSimple $ send $ HttpRequestStreaming (modifyRequest request) callback) action
+-- Modifies requests before they are sent to the interpreter
+withStreamingHeaders :: Members [Logging, HTTPStreaming] r => (HTTPRequest -> HTTPRequest) -> Sem r a -> Sem r a
+withStreamingHeaders modifyRequest = intercept $ \case
+    StartStream request -> send $ StartStream (modifyRequest request)
+    FetchItem streamId -> send $ FetchItem streamId
+    CloseStream streamId -> send $ CloseStream streamId
 
--- | Simple HTTP streaming logging interceptor - logs method and URI only
-withSimpleHTTPStreamingLogging :: (Members [Logging, HTTPStreaming] r, Member Fail r) => Sem r a -> Sem r a
-withSimpleHTTPStreamingLogging = interceptH $ \case
-    HttpRequestStreaming request callback -> do
-        raise $ info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
-        runTSimple $ send $ HttpRequestStreaming request callback
+-- | Simple HTTP streaming logging interceptor - logs start and completion of streams
+-- Logs method and URI when stream starts, and a completion message when it closes
+withSimpleHTTPStreamingLogging :: Members [Logging, HTTPStreaming] r => Sem r a -> Sem r a
+withSimpleHTTPStreamingLogging = intercept $ \case
+    StartStream request -> do
+        info $ fromString request.method <> fromString " " <> fromString request.uri <> fromString " (streaming)"
+        send $ StartStream request
+    FetchItem streamId -> send $ FetchItem streamId
+    CloseStream streamId -> do
+        result <- send $ CloseStream streamId
+        info $ fromString "Stream completed"
+        return result
 
--- | Full HTTP streaming logging interceptor - logs method, URI, headers, and body
-withFullHTTPStreamingLogging :: (Members [Logging, HTTPStreaming] r, Member Fail r) => Sem r a -> Sem r a
-withFullHTTPStreamingLogging = interceptH $ \case
-    HttpRequestStreaming request callback -> do
-        raise $ do
-            info $ fromString "HTTP Streaming Request: " <> fromString request.method <> fromString " " <> fromString request.uri
-            info $ fromString "Headers: " <> fromString (show request.headers)
-            case request.body of
-                Just b -> info $ fromString "Body: " <> fromString (show b)
-                Nothing -> info $ fromString "Body: (none)"
-        runTSimple $ send $ HttpRequestStreaming request callback
--}
+-- | Full HTTP streaming logging interceptor - logs method, URI, headers, body at start, and completion
+withFullHTTPStreamingLogging :: Members [Logging, HTTPStreaming] r => Sem r a -> Sem r a
+withFullHTTPStreamingLogging = intercept $ \case
+    StartStream request -> do
+        info $ fromString "HTTP Streaming Request: " <> fromString request.method <> fromString " " <> fromString request.uri
+        info $ fromString "Headers: " <> fromString (show request.headers)
+        case request.body of
+            Just b -> info $ fromString "Body: " <> fromString (show b)
+            Nothing -> info $ fromString "Body: (none)"
+        send $ StartStream request
+    FetchItem streamId -> send $ FetchItem streamId
+    CloseStream streamId -> do
+        result <- send $ CloseStream streamId
+        info $ fromString "HTTP Stream completed"
+        return result
 
 -- | Simple HTTP logging interceptor - logs method and URI only
 withSimpleHTTPLogging :: Members [Logging, HTTP] r => Sem r a -> Sem r a
