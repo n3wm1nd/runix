@@ -25,7 +25,7 @@ import Polysemy.Fail (Fail)
 import GHC.Stack
 import Runix.Cmd (Cmds, cmdsExec)
 import qualified Runix.Cmd as CmdE
-import Runix.Logging (Logging, info)
+import Runix.Logging (Logging, info, loggingNull)
 import Runix.FileSystem.System (FileSystemRead, fileExists)
 import qualified Runix.FileSystem as FS
 import Runix.FileSystem (HasProjectPath(..))
@@ -50,10 +50,10 @@ makeSem ''Grep
 -- Used when working with System.FileSystemRead (not chrooted)
 type GrepSystem = Grep ()
 
--- | Grep interpreter using ripgrep (for System filesystem)
+-- | Grep interpreter using ripgrep (for System filesystem) with verbose logging
 -- Works with non-parameterized System.FileSystemRead
-grepIO :: HasCallStack => Members [Cmds, Logging, FileSystemRead, Fail] r => Sem (GrepSystem : r) a -> Sem r a
-grepIO = interpret $ \case
+grepIOVerbose :: HasCallStack => Members [Cmds, FileSystemRead, Logging, Fail] r => Sem (GrepSystem : r) a -> Sem r a
+grepIOVerbose = interpret $ \case
     GrepSearch basePath pattern -> do
         info $ fromString "grep search: " <> fromString pattern <> fromString " in " <> fromString basePath
         result <- cmdsExec "rg" ["--line-number", "--with-filename", "--", pattern, basePath]
@@ -83,17 +83,22 @@ grepIO = interpret $ \case
                 _ -> Nothing
             _ -> Nothing
 
--- | Grep interpreter that works with parameterized chrooted filesystems
+-- | Grep interpreter using ripgrep (quiet version)
+-- Runs the verbose version but discards logging
+grepIO :: HasCallStack => Members [Cmds, FileSystemRead, Fail] r => Sem (GrepSystem : r) a -> Sem r a
+grepIO = loggingNull . grepIOVerbose . raiseUnder
+
+-- | Grep interpreter that works with parameterized chrooted filesystems with verbose logging
 -- Translates paths from chroot coordinates to system coordinates for ripgrep,
 -- then translates results back to chroot coordinates
-grepForFilesystem :: forall project r a.
-                     ( HasCallStack
-                     , HasProjectPath project
-                     , Members '[FS.FileSystem project, FS.FileSystemRead project, Cmds, Logging, Fail] r
-                     )
-                  => Sem (Grep project : r) a
-                  -> Sem r a
-grepForFilesystem = interpret $ \case
+grepForFilesystemVerbose :: forall project r a.
+                            ( HasCallStack
+                            , HasProjectPath project
+                            , Members '[FS.FileSystem project, FS.FileSystemRead project, Cmds, Logging, Fail] r
+                            )
+                         => Sem (Grep project : r) a
+                         -> Sem r a
+grepForFilesystemVerbose = interpret $ \case
     GrepSearch basePath pattern -> do
         -- Get project configuration and virtual CWD
         proj <- FS.getFileSystem @project
@@ -141,3 +146,14 @@ grepForFilesystem = interpret $ \case
                     _ -> Nothing
                 _ -> Nothing
             _ -> Nothing
+
+-- | Grep interpreter for parameterized filesystems (quiet version)
+-- Runs the verbose version but discards logging
+grepForFilesystem :: forall project r a.
+                     ( HasCallStack
+                     , HasProjectPath project
+                     , Members '[FS.FileSystem project, FS.FileSystemRead project, Cmds, Fail] r
+                     )
+                  => Sem (Grep project : r) a
+                  -> Sem r a
+grepForFilesystem = loggingNull . grepForFilesystemVerbose . raiseUnder

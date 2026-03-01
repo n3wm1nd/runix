@@ -51,7 +51,7 @@ import Data.String (fromString)
 import GHC.Stack
 import qualified System.Directory
 import qualified System.FilePath.Glob as Glob
-import Runix.Logging (Logging, info)
+import Runix.Logging (Logging, info, loggingNull)
 import System.IO.Error (tryIOError, userError)
 
 -- | Read-only filesystem operations
@@ -127,9 +127,9 @@ basicResolvePath path =
     step acc ".." = init acc              -- Go up one level (remove last component)
     step acc part = acc ++ [part]         -- Normal component
 
--- | IO interpreter for FileSystemRead effect
-filesystemReadIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemRead : r) a -> Sem r a
-filesystemReadIO = interpret $ \case
+-- | IO interpreter for FileSystemRead effect with verbose logging
+filesystemReadIOVerbose :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemRead : r) a -> Sem r a
+filesystemReadIOVerbose = interpret $ \case
     ReadFile p -> do
         info $ fromString "reading file: " <> fromString p
         embed (tryIOError $ BS.readFile p) >>= return . either (Left . show) Right
@@ -154,9 +154,15 @@ filesystemReadIO = interpret $ \case
         let compiledPattern = Glob.compile pat
         Glob.globDir1 compiledPattern base
 
--- | IO interpreter for FileSystemWrite effect
-filesystemWriteIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemWrite : r) a -> Sem r a
-filesystemWriteIO = interpret $ \case
+-- | IO interpreter for FileSystemRead effect (quiet version)
+-- Runs the verbose version but discards all logging output
+filesystemReadIO :: HasCallStack => Member (Embed IO) r => Sem (FileSystemRead : r) a -> Sem r a
+filesystemReadIO = loggingNull . filesystemReadIOVerbose . raiseUnder
+
+
+-- | IO interpreter for FileSystemWrite effect with verbose logging
+filesystemWriteIOVerbose :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemWrite : r) a -> Sem r a
+filesystemWriteIOVerbose = interpret $ \case
     WriteFile p d -> do
         info $ fromString "writing file: " <> fromString p
         embed (tryIOError $ BS.writeFile p d) >>= return . either (Left . show) Right
@@ -167,20 +173,17 @@ filesystemWriteIO = interpret $ \case
         info $ fromString "removing: " <> fromString p <> (if recursive then fromString " (recursive)" else fromString "")
         embed (tryIOError $ removePathSafe recursive p) >>= return . either (Left . show) Right
   where
-    -- Safe removal that handles both files and directories
     removePathSafe :: Bool -> FilePath -> IO ()
-    removePathSafe recursive path = do
-        isDir <- System.Directory.doesDirectoryExist path
-        isFile <- System.Directory.doesFileExist path
-        if isDir
-            then if recursive
-                 then System.Directory.removeDirectoryRecursive path
-                 else System.Directory.removeDirectory path
-            else if isFile
-                 then System.Directory.removeFile path
-                 else ioError $ userError $ "Path does not exist: " ++ path
+    removePathSafe True p = System.Directory.removePathForcibly p
+    removePathSafe False p = System.Directory.removeFile p
 
--- | Combined IO interpreter for backwards compatibility
--- Interprets both FileSystemRead and FileSystemWrite
-filesystemIO :: HasCallStack => Members [Embed IO, Logging] r => Sem (FileSystemRead : FileSystemWrite : r) a -> Sem r a
+-- | IO interpreter for FileSystemWrite effect (quiet version)
+-- Runs the verbose version but discards all logging output
+filesystemWriteIO :: HasCallStack => Member (Embed IO) r => Sem (FileSystemWrite : r) a -> Sem r a
+filesystemWriteIO = loggingNull . filesystemWriteIOVerbose . raiseUnder
+
+-- | Convenience function to interpret both read and write filesystem effects
+filesystemIO :: (HasCallStack, Member (Embed IO) r)
+             => Sem (FileSystemRead : FileSystemWrite : r) a
+             -> Sem r a
 filesystemIO = filesystemWriteIO . filesystemReadIO

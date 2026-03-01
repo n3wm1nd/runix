@@ -8,11 +8,13 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Runix.Logging where
 import Polysemy
 import Polysemy.Error
 import Polysemy.Fail
+import Polysemy.Writer (Writer, tell, runWriter)
 import Data.Kind (Type)
 import GHC.Stack
 import Data.Text (Text)
@@ -52,10 +54,17 @@ loggingIO = interpret $ \v -> do
         funname _ = ""
 
 -- | Null interpreter for Logging (discards all logs)
--- NOTE: Currently unused, but kept for future use
 loggingNull :: Sem (Logging : r) a -> Sem r a
 loggingNull = interpret $ \case
     Log _ _ _ -> pure ()
+
+-- | Interpreter that captures logs to a list
+-- Returns both the list of log messages and the result
+-- Useful for testing
+loggingList :: forall r a. Sem (Logging : r) a -> Sem r ([(Level, Text)], a)
+loggingList = runWriter . reinterpret @Logging @(Writer [(Level, Text)]) (\case
+    Log level _cs msg -> tell [(level, msg)]
+    )
 
 -- | Interpreter that converts Fail to Logging + Error
 failLog :: Members [Logging, Error String] r => Sem (Fail : r) a -> Sem r a
