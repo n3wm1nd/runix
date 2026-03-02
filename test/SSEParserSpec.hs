@@ -9,8 +9,9 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Aeson as Aeson
 import Data.Default (def)
-import Runix.Streaming.SSE (extractContentFromChunk, StreamingContent(..), reassembleSSE)
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAISuccessResponse)
+import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
+import Runix.LLM.Interpreter (StreamingContent(..))
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAISuccessResponse, OpenAIDelta, parseOpenAIDelta, applyOpenAIDelta, extractOpenAIStreamingContent, OpenAIStreamingContent(..))
 import UniversalLLM (Message(..), Model(..), fromProviderResponse)
 import qualified UniversalLLM.Providers.OpenAI as OpenAI
 import UniversalLLM.Providers.OpenAI (OpenRouter(..))
@@ -22,7 +23,15 @@ spec = do
       -- This is the actual format from OpenRouter GLM 4.5 streaming response
       let chunk = BS.pack "data: {\"id\":\"gen-1765381969-tDN9trahXBXJBmjRjPF4\",\"provider\":\"AtlasCloud\",\"model\":\"z-ai/glm-4.5-air:free\",\"object\":\"chat.completion.chunk\",\"created\":1765381969,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"1\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"1\",\"format\":\"unknown\",\"index\":0}]},\"finish_reason\":null,\"native_finish_reason\":null,\"logprobs\":null}]}\n\n"
 
-      let result = extractContentFromChunk chunk
+      -- Parse SSE to get events
+      let SSEParseResult events _ = parseSSEChunks chunk
+      -- Parse each event's data as delta and extract content
+      let deltas = [delta | event <- events, Just delta <- [parseOpenAIDelta (sseEventData event)]]
+          contents = concatMap extractOpenAIStreamingContent deltas
+          result = [case c of
+                     OpenAIStreamingText t -> StreamingText t
+                     OpenAIStreamingReasoning t -> StreamingReasoning t
+                   | c <- contents]
 
       -- Should extract reasoning text
       result `shouldBe` [StreamingReasoning "1"]
@@ -30,14 +39,26 @@ spec = do
     it "extracts reasoning from delta.reasoning field with multi-char text" $ do
       let chunk = BS.pack "data: {\"id\":\"gen-1765381969-tDN9trahXBXJBmjRjPF4\",\"provider\":\"AtlasCloud\",\"model\":\"z-ai/glm-4.5-air:free\",\"object\":\"chat.completion.chunk\",\"created\":1765381969,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"alyze\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"alyze\",\"format\":\"unknown\",\"index\":0}]},\"finish_reason\":null,\"native_finish_reason\":null,\"logprobs\":null}]}\n\n"
 
-      let result = extractContentFromChunk chunk
+      let SSEParseResult events _ = parseSSEChunks chunk
+          deltas = [delta | event <- events, Just delta <- [parseOpenAIDelta (sseEventData event)]]
+          contents = concatMap extractOpenAIStreamingContent deltas
+          result = [case c of
+                     OpenAIStreamingText t -> StreamingText t
+                     OpenAIStreamingReasoning t -> StreamingReasoning t
+                   | c <- contents]
 
       result `shouldBe` [StreamingReasoning "alyze"]
 
     it "extracts regular content when no reasoning present" $ do
       let chunk = BS.pack "data: {\"id\":\"gen-123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"
 
-      let result = extractContentFromChunk chunk
+      let SSEParseResult events _ = parseSSEChunks chunk
+          deltas = [delta | event <- events, Just delta <- [parseOpenAIDelta (sseEventData event)]]
+          contents = concatMap extractOpenAIStreamingContent deltas
+          result = [case c of
+                     OpenAIStreamingText t -> StreamingText t
+                     OpenAIStreamingReasoning t -> StreamingReasoning t
+                   | c <- contents]
 
       result `shouldBe` [StreamingText "Hello"]
 
@@ -46,10 +67,18 @@ spec = do
       let chunk1 = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning\":\"Think\"}}]}\n\n"
           chunk2 = "data: {\"choices\":[{\"delta\":{\"reasoning\":\"ing...\"}}]}\n\n"
           chunk3 = "data: {\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}\n\n"
-          sseBody = BSL.fromChunks [BS.pack chunk1, BS.pack chunk2, BS.pack chunk3]
+          fullChunk = BS.concat [BS.pack chunk1, BS.pack chunk2, BS.pack chunk3]
           emptyResp = OpenAISuccess defaultOpenAISuccessResponse
 
-      let reassembled = reassembleSSE mergeOpenAIDelta emptyResp sseBody
+      -- Parse SSE events and accumulate using deltas
+      let SSEParseResult events _ = parseSSEChunks fullChunk
+          deltas = [delta | event <- events, Just delta <- [parseOpenAIDelta (sseEventData event)]]
+          -- Apply deltas using the full Value-based merge (which handles accumulation properly)
+          jsonDeltas = [Aeson.decode (BSL.fromStrict (sseEventData event)) | event <- events]
+          reassembled = foldl (\acc mVal -> case mVal of
+                                  Just val -> mergeOpenAIDelta acc val
+                                  Nothing -> acc
+                              ) emptyResp jsonDeltas
 
       -- Check that reasoning was accumulated in reasoning_content
       case reassembled of

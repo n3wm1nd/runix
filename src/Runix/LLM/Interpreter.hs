@@ -30,6 +30,7 @@ module Runix.LLM.Interpreter
   , ProviderProtocol(..)
   , EnableStreaming(..)
   , ProtocolRequest
+  , StreamingContent(..)
     -- * Cancellation wrapper
   , withLLMCancellation
     -- * Generic model wrappers
@@ -70,39 +71,68 @@ import qualified Runix.Streaming as Streaming
 import Runix.Streaming (interpretStreamingStateful)
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
 import Runix.Cancellation (Cancellation, onCancellation)
-import Runix.Streaming.SSE (StreamingContent(..), extractContentFromChunk, parseSSE)
+import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 import qualified Data.ByteString.Lazy as BSL
-import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming)
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming)
+import qualified Data.ByteString as BS
+import Data.Aeson (decode)
+import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming, AnthropicDelta, AnthropicStreamingContent(..), parseAnthropicDelta, applyAnthropicDelta, extractAnthropicStreamingContent)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming, OpenAIDelta, OpenAIStreamingContent(..), parseOpenAIDelta, applyOpenAIDelta, extractOpenAIStreamingContent)
 
 -- ============================================================================
 -- Protocol Typeclass
 -- ============================================================================
 
+-- | Streaming content that can be different types of chunks
+data StreamingContent = StreamingText Text | StreamingReasoning Text
+  deriving (Show, Eq)
+
 -- | Typeclass for provider protocols (Anthropic vs OpenAI-compatible)
 -- Abstracts over the protocol-specific details like endpoint path and streaming handling
 class ProviderProtocol response where
   type ProtocolRequest response
+  type ProtocolDelta response
   -- | The endpoint path for this protocol
   protocolEndpoint :: Endpoint
   -- | Create an empty response for streaming accumulation
   emptyStreamingResponse :: response
-  -- | Merge a streaming delta (as JSON Value) into the accumulated response
+  -- | Parse a delta from SSE event data (ByteString)
+  parseDelta :: BS.ByteString -> Maybe (ProtocolDelta response)
+  -- | Apply a delta to the accumulated response (simplified, for typed deltas)
+  applyDelta :: response -> ProtocolDelta response -> response
+  -- | Extract streaming content from a delta for display
+  extractStreamingContent :: ProtocolDelta response -> [StreamingContent]
+  -- | Full Value-based delta merge (for complete accumulation including tool calls)
   mergeStreamingDelta :: response -> Value -> response
 
 instance ProviderProtocol AnthropicResponse where
   type ProtocolRequest AnthropicResponse = AnthropicRequest
+  type ProtocolDelta AnthropicResponse = AnthropicDelta
   protocolEndpoint = Endpoint "messages"
   emptyStreamingResponse = AnthropicSuccess $
     AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+  parseDelta = parseAnthropicDelta
+  applyDelta = applyAnthropicDelta
+  extractStreamingContent delta =
+      [case c of
+         AnthropicStreamingText t -> StreamingText t
+         AnthropicStreamingReasoning t -> StreamingReasoning t
+      | c <- extractAnthropicStreamingContent delta]
   mergeStreamingDelta = mergeAnthropicDelta
 
 instance ProviderProtocol OpenAIResponse where
   type ProtocolRequest OpenAIResponse = OpenAIRequest
+  type ProtocolDelta OpenAIResponse = OpenAIDelta
   protocolEndpoint = Endpoint "chat/completions"
   emptyStreamingResponse = OpenAISuccess $
     defaultOpenAISuccessResponse
       { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
+  parseDelta = parseOpenAIDelta
+  applyDelta = applyOpenAIDelta
+  extractStreamingContent delta =
+      [case c of
+         OpenAIStreamingText t -> StreamingText t
+         OpenAIStreamingReasoning t -> StreamingReasoning t
+      | c <- extractOpenAIStreamingContent delta]
   mergeStreamingDelta = mergeOpenAIDelta
 
 -- ============================================================================
@@ -194,6 +224,7 @@ interpretLLM composableProvider model action =
 data LLMStreamState model s = LLMStreamState
     { streamHTTPStreamId :: Streaming.StreamId  -- HTTP stream ID for this LLM stream
     , streamEventBuffer :: [StreamEvent]  -- Buffered events from current chunk
+    , streamSSERemainder :: BS.ByteString  -- Incomplete SSE data from previous chunk
     , streamAccumulatedResponse :: ProviderResponse model  -- Accumulated response
     , streamStackState :: s
     , streamConfigs :: [ModelConfig model]
@@ -254,6 +285,7 @@ interpretLLMStream api composableProvider model action =
             Right httpStreamId -> do
                 let initialStreamState = LLMStreamState
                         { streamEventBuffer = []
+                        , streamSSERemainder = BS.empty
                         , streamAccumulatedResponse = emptyStreamingResponse @(ProviderResponse model)
                         , streamStackState = stackState'
                         , streamHTTPStreamId = httpStreamId
@@ -274,26 +306,39 @@ interpretLLMStream api composableProvider model action =
                 case mChunk of
                     Nothing -> return (Nothing, streamState)  -- HTTP stream ended
                     Just chunk -> do
-                        -- Extract streaming content from SSE chunk
-                        let contents = extractContentFromChunk chunk
-                            events = map contentToEvent contents
+                        -- Combine with SSE remainder from previous chunk
+                        let input = streamSSERemainder streamState <> chunk
+                            SSEParseResult sseEvents remainder = parseSSEChunks input
 
-                        -- Parse SSE chunk to get JSON deltas and merge into accumulated response
-                        let chunkLazy = BSL.fromStrict chunk
-                            deltas = parseSSE chunkLazy
-                            accumulated' = foldl (mergeStreamingDelta @(ProviderResponse model))
+                        -- Parse event data as JSON Values for accumulation
+                        let jsonValues = [val | event <- sseEvents
+                                              , Just val <- [decode (BSL.fromStrict (sseEventData event))]]
+
+                        -- Merge JSON deltas into accumulated response using full Value-based merge
+                        -- (This handles all delta types including tool calls, not just text/reasoning)
+                        let accumulated' = foldl (mergeStreamingDelta @(ProviderResponse model))
                                                  (streamAccumulatedResponse streamState)
-                                                 deltas
+                                                 jsonValues
+
+                        -- Parse typed deltas for extracting streaming content display
+                        let typedDeltas = [delta | event <- sseEvents
+                                                 , Just delta <- [parseDelta @(ProviderResponse model) (sseEventData event)]]
+                            contents = concatMap (extractStreamingContent @(ProviderResponse model)) typedDeltas
+                            events = map contentToEvent contents
 
                         case events of
                             [] -> do
-                                -- Update accumulated response but no events to emit, recursively fetch next
-                                onFetch (streamState { streamAccumulatedResponse = accumulated' })
+                                -- Update accumulated response and remainder but no events to emit
+                                onFetch (streamState
+                                    { streamAccumulatedResponse = accumulated'
+                                    , streamSSERemainder = remainder
+                                    })
                             (event:rest) -> do
-                                -- Update state with new accumulation and buffered events
+                                -- Update state with new accumulation, buffered events, and remainder
                                 let streamState' = streamState
                                         { streamEventBuffer = rest
                                         , streamAccumulatedResponse = accumulated'
+                                        , streamSSERemainder = remainder
                                         }
                                 return (Just event, streamState')
 

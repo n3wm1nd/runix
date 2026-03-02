@@ -2,77 +2,39 @@
 
 -- | Conduit-based SSE (Server-Sent Events) parsing utilities
 --
--- Provides conduit transformers for parsing SSE streams and extracting content.
+-- Provides conduit transformers for parsing SSE streams.
 -- Use these to process streaming HTTP responses from LLM providers.
 module Runix.Streaming.SSE.Conduit
   ( -- * Conduit transformers
     parseSSEConduit
-  , extractContentConduit
-  , reassembleConduit
-    -- * Re-exports from SSE module
-  , StreamingContent(..)
-  , parseSSE
-  , extractContentFromChunk
   ) where
 
 import Conduit
-import Data.Aeson (Value)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
+import Data.ByteString (ByteString)
 
-import Runix.Streaming.SSE (StreamingContent(..), parseSSE, extractContentFromChunk)
+import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 
 -- | Parse SSE format from ByteString chunks
 --
--- Converts raw byte chunks into JSON values by parsing SSE "data: {...}" lines.
--- Buffers partial lines across chunk boundaries.
+-- Converts raw byte chunks into SSE events, properly handling chunk boundaries.
+-- Maintains state across chunks to handle events split across HTTP chunk boundaries.
 --
 -- Usage:
 -- @
--- source .| parseSSEConduit .| mapM_C processValue
+-- source .| parseSSEConduit .| mapM_C processEvent
 -- @
-parseSSEConduit :: Monad m => ConduitT BS.ByteString Value m ()
-parseSSEConduit = do
-    -- Convert strict ByteStrings to lazy for parseSSE
-    chunk <- await
-    case chunk of
-        Nothing -> return ()
-        Just bs -> do
-            let values = parseSSE (BSL.fromStrict bs)
-            mapM_ yield values
-            parseSSEConduit
-
--- | Extract streaming content from SSE chunks
---
--- Parses SSE format and extracts text/reasoning content from provider-specific formats.
--- Handles both Anthropic and OpenAI streaming formats.
---
--- Usage:
--- @
--- source .| extractContentConduit .| mapM_C displayContent
--- @
-extractContentConduit :: Monad m => ConduitT BS.ByteString StreamingContent m ()
-extractContentConduit = do
-    chunk <- await
-    case chunk of
-        Nothing -> return ()
-        Just bs -> do
-            let contents = extractContentFromChunk bs
-            mapM_ yield contents
-            extractContentConduit
-
--- | Reassemble SSE stream into final response
---
--- Applies a delta merger function to accumulate streaming chunks into a final response.
--- The merger knows how to combine provider-specific deltas.
---
--- Usage:
--- @
--- chunks <- runConduit $ source .| parseSSEConduit .| sinkList
--- let finalResponse = reassembleConduit mergeFunction initialState chunks
--- @
-reassembleConduit :: (response -> Value -> response)  -- ^ Delta merger
-                  -> response                          -- ^ Initial state
-                  -> [Value]                           -- ^ SSE chunks
-                  -> response                          -- ^ Final response
-reassembleConduit = foldl
+parseSSEConduit :: Monad m => ConduitT BS.ByteString SSEEvent m ()
+parseSSEConduit = go BS.empty
+  where
+    go buffer = do
+        mChunk <- await
+        case mChunk of
+            Nothing ->
+                -- End of stream - if there's buffered data, it's incomplete
+                return ()
+            Just chunk -> do
+                let input = buffer <> chunk
+                    SSEParseResult events remainder = parseSSEChunks input
+                mapM_ yield events
+                go remainder

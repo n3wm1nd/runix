@@ -59,12 +59,12 @@ import UniversalLLM.Tools (LLMTool(..))
 -- This ensures anyone using LLM effects automatically gets the instances they need
 import Runix.LLM.ToolInstances ()
 
-import Runix.Streaming.SSE (StreamingContent)
+import Runix.LLMStream (StreamEvent)
 
 -- | Info metadata delivered during LLM queries (streaming chunks, usage, etc.).
 --
 -- Plain data, delivered to the callback in 'QueryLLM'.
-data LLMInfo = LLMInfo StreamingContent
+data LLMInfo = LLMInfo StreamEvent
   deriving (Show, Eq)
 
 -- | The LLM effect — first-order request/response.
