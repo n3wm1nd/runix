@@ -97,7 +97,7 @@ openrouter action = do
         Nothing -> fail "OPENROUTER_API_KEY environment variable not set"
         Just key ->
             restapiHTTP (OpenRouterAuth key)
-            . interpretLLM @OpenRouterAuth OpenAI.baseComposableProvider (Model (GenericModel "deepseek/deepseek-chat-v3-0324:free") OpenRouter)
+            . interpretLLM @OpenRouterAuth OpenAI.baseComposableProvider (Model (GenericModel "deepseek/deepseek-chat-v3-0324:free") OpenRouter) []
             . raiseUnder
             $ action
 

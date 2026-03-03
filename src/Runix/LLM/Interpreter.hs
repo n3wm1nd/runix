@@ -179,19 +179,21 @@ interpretLLMWithState :: forall p model s r a.
                          , Members '[RestAPI p, State (model, s)] r
                          )
                       => ComposableProvider model s
+                      -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
                       -> Sem (LLM model : r) a
                       -> Sem r a
-interpretLLMWithState composableProvider = interpret $ \case
-    QueryLLM configs messages -> do
+interpretLLMWithState composableProvider defaultConfigs = interpret $ \case
+    QueryLLM queryConfigs messages -> do
+        let mergedConfigs = queryConfigs ++ defaultConfigs
         (m, stackState) <- get @(model, s)
-        let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
+        let (stackState', request) = toProviderRequest composableProvider m mergedConfigs stackState messages
         let requestValue = toJSONViaCodec request
 
         result <- sendRequest @p requestValue
         case result of
             Left err -> return $ Left $ "Failed to parse response: " ++ err
             Right providerResponse ->
-                case fromProviderResponse composableProvider m configs stackState' providerResponse of
+                case fromProviderResponse composableProvider m mergedConfigs stackState' providerResponse of
                     Left err -> return $ Left $ "LLM error: " ++ show err
                     Right (stackState'', resultMessages) -> do
                         put (m, stackState'')
@@ -209,11 +211,12 @@ interpretLLM :: forall p model s r a.
                 )
              => ComposableProvider model s
              -> model
+             -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
              -> Sem (LLM model : r) a
              -> Sem r a
-interpretLLM composableProvider model action =
+interpretLLM composableProvider model defaultConfigs action =
     evalState (model, def @s) $
-    interpretLLMWithState @p composableProvider $
+    interpretLLMWithState @p composableProvider defaultConfigs $
     raiseUnder action
 
 -- ============================================================================
@@ -249,9 +252,10 @@ interpretLLMStream :: forall p model s r a.
                    => p
                    -> ComposableProvider model s
                    -> model
+                   -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
                    -> Sem (LLMStreaming model : r) a
                    -> Sem r a
-interpretLLMStream api composableProvider model action =
+interpretLLMStream api composableProvider model defaultConfigs action =
     evalState (model, def @s) $
     interpretStreamingStateful onStart onFetch onClose $
     raiseUnder @(State (model, s)) action
@@ -261,9 +265,10 @@ interpretLLMStream api composableProvider model action =
     contentToEvent (StreamingReasoning txt) = StreamThinking txt
 
     -- Initialize: Build HTTP request and start HTTP stream
-    onStart (configs, messages) = do
+    onStart (queryConfigs, messages) = do
         (m, stackState) <- get @(model, s)
 
+        let configs = queryConfigs ++ defaultConfigs
         -- Build the provider request
         let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
             -- Enable streaming on the request
@@ -494,11 +499,12 @@ interpretLLMWith :: forall p model s r a.
                  => p
                  -> ComposableProvider model s
                  -> model
+                 -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
                  -> Sem (LLM model : r) a
                  -> Sem r a
-interpretLLMWith api composableProvider model action =
+interpretLLMWith api composableProvider model defaultConfigs action =
     restapiHTTP api $
-    interpretLLM @p composableProvider model $
+    interpretLLM @p composableProvider model defaultConfigs $
     raiseUnder @(RestAPI p)
     action
 
@@ -517,10 +523,11 @@ interpretLLMStreamingWith :: forall p model s r a.
                           => p
                           -> ComposableProvider model s
                           -> model
+                          -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
                           -> Sem (LLMStreaming model : r) a
                           -> Sem r a
-interpretLLMStreamingWith api composableProvider model action =
-    interpretLLMStream api composableProvider model action
+interpretLLMStreamingWith api composableProvider model defaultConfigs action =
+    interpretLLMStream api composableProvider model defaultConfigs action
 
 -- ============================================================================
 -- Cancellable Wrapper

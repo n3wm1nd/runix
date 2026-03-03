@@ -149,7 +149,7 @@ testRunner composableProvider model sseBody action =
     . mockHTTP sseBody
     . cancelNoop
     . ignoreChunks @BS.ByteString
-    . interpretLLMStreamingWith (OpenAIAuth "mock-api-key") composableProvider model
+    . interpretLLMStreamingWith (OpenAIAuth "mock-api-key") composableProvider model []
     $ action
 
 -- ============================================================================
