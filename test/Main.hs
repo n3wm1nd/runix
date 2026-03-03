@@ -36,7 +36,7 @@ import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
 import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
 import Runix.Streaming (fetchNext)
-import Runix.HTTP (HTTP, HTTPRequest, HTTPStreaming, HTTPResponse(..))
+import Runix.HTTP (HTTP, HTTPRequest, HTTPStreaming, HTTPStreamResult(..), HTTPResponse(..))
 import qualified Runix.HTTP as HTTPEff
 import Runix.Logging (Logging, loggingNull)
 import Runix.Cancellation (Cancellation, cancelNoop)
@@ -95,7 +95,7 @@ claudeSonnet45ComposableProvider = withReasoning `chainProviders` withTools `cha
 -- SSE responses come from real Anthropic API calls recorded in universal-llm tests
 mockHTTP :: forall r a. BSL.ByteString -> Members '[Logging, Embed IO, Fail] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
 mockHTTP sseBody =
-    -- First interpret HTTPStreaming (which is Streaming BS.ByteString () HTTPRequest)
+    -- First interpret HTTPStreaming (which is Streaming BS.ByteString HTTPStreamResult HTTPRequest)
     interpretStreamingStateful onStart onFetch onClose
     -- Then interpret HTTP (non-streaming)
     . interpret @HTTP (\case
@@ -119,9 +119,9 @@ mockHTTP sseBody =
     onFetch [] = return (Nothing, [])
     onFetch (c:cs) = return (Just c, cs)
 
-    -- Close: return unit
-    onClose :: [BS.ByteString] -> Sem r ()
-    onClose _ = return ()
+    -- Close: return success result
+    onClose :: [BS.ByteString] -> Sem r HTTPStreamResult
+    onClose _ = return $ HTTPStreamResult 200 [] BSL.empty
 
 -- ============================================================================
 -- Test Runner

@@ -14,7 +14,8 @@ import Polysemy.Fail (Fail, runFail)
 import qualified Data.ByteString as BS
 import Data.IORef
 
-import Runix.HTTP (HTTPStreaming, HTTPRequest(..), withSimpleHTTPStreamingLogging, withStreamingHeaders)
+import qualified Data.ByteString.Lazy as BSL
+import Runix.HTTP (HTTPStreaming, HTTPStreamResult(..), HTTPRequest(..), withSimpleHTTPStreamingLogging, withStreamingHeaders)
 import Runix.Streaming (Streaming(..), interpretStreamingStateful, startStream, fetchNext)
 import Runix.Logging (Logging(..), Level(..))
 
@@ -35,8 +36,8 @@ mockHTTPStreaming = interpretStreamingStateful onStart onFetch onClose
     onFetch [] = return (Nothing, [])
     onFetch (chunk:rest) = return (Just chunk, rest)
 
-    onClose :: [BS.ByteString] -> Sem r ()
-    onClose _ = return ()
+    onClose :: [BS.ByteString] -> Sem r HTTPStreamResult
+    onClose _ = return $ HTTPStreamResult 200 [] BSL.empty
 
 -- ============================================================================
 -- Tests
@@ -67,7 +68,7 @@ spec = describe "HTTP Streaming Interceptors" $ do
                $ mockHTTPStreaming
                $ loggingToIORef
                $ withSimpleHTTPStreamingLogging $ do
-                    ((), (_ :: ())) <- startStream @BS.ByteString testRequest $ do
+                    ((), (_ :: HTTPStreamResult)) <- startStream @BS.ByteString testRequest $ do
                         _ <- fetchNext @BS.ByteString
                         _ <- fetchNext @BS.ByteString
                         _ <- fetchNext @BS.ByteString
@@ -104,7 +105,7 @@ spec = describe "HTTP Streaming Interceptors" $ do
                $ mockHTTPStreaming
                $ loggingNull
                $ withStreamingHeaders addAuthHeader $ do
-                    ((), (_ :: ())) <- startStream @BS.ByteString testRequest $ return ()
+                    ((), (_ :: HTTPStreamResult)) <- startStream @BS.ByteString testRequest $ return ()
                     return ()
 
             -- If it didn't crash, the test passes

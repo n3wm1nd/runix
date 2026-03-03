@@ -66,13 +66,14 @@ import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..))
 import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
-import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming)
+import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming, HTTPStreamResult(..))
 import qualified Runix.Streaming as Streaming
 import Runix.Streaming (interpretStreamingStateful)
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
 import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString as BS
 import Data.Aeson (decode)
 import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming, AnthropicDelta, AnthropicStreamingContent(..), parseAnthropicDelta, applyAnthropicDelta, extractAnthropicStreamingContent)
@@ -347,17 +348,21 @@ interpretLLMStream api composableProvider model defaultConfigs action =
                                         }
                                 return (Just event, streamState')
 
-    -- Close: Convert accumulated response to messages
+    -- Close: Check HTTP status, then convert accumulated response to messages
     onClose streamState = do
         (m, _) <- get @(model, s)
-        -- Close the HTTP stream
-        _ <- raise $ send (Streaming.CloseStream (streamHTTPStreamId streamState))
-        -- Use composableProvider to convert accumulated response to messages
-        case fromProviderResponse composableProvider m (streamConfigs streamState)
-                (streamStackState streamState)
-                (streamAccumulatedResponse streamState) of
-            Left err -> return $ Left $ "Failed to parse accumulated response: " ++ show err
-            Right (_stackState', messages) -> return $ Right messages
+        -- Close the HTTP stream and get the result
+        httpResult <- raise $ send (Streaming.CloseStream (streamHTTPStreamId streamState))
+        if streamStatusCode httpResult < 200 || streamStatusCode httpResult >= 300
+        then return $ Left $ "HTTP error " ++ show (streamStatusCode httpResult)
+                          ++ ": " ++ BSL8.unpack (streamBody httpResult)
+        else
+            -- Use composableProvider to convert accumulated response to messages
+            case fromProviderResponse composableProvider m (streamConfigs streamState)
+                    (streamStackState streamState)
+                    (streamAccumulatedResponse streamState) of
+                Left err -> return $ Left $ "Failed to parse accumulated response: " ++ show err
+                Right (_stackState', messages) -> return $ Right messages
 
 -- | Start an LLM streaming request
 --

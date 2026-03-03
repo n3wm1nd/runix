@@ -15,9 +15,7 @@
 module Runix.HTTP where
 import Prelude
 import Polysemy
-import Polysemy.Internal.Tactics (runTSimple, pureT, getInspectorT, bindT)
 import Polysemy.Fail
-import Polysemy.State (State, get, put, modify, evalState)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString as BS
@@ -34,9 +32,7 @@ import Runix.Streaming (Streaming(..), StreamResult(..), StreamId(..), fetchNext
 import Conduit
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-import qualified Data.Map.Strict as Data.Map
 import Data.Conduit.Combinators (iterM)
-import Polysemy.Embed (runEmbedded)
 
 data HTTPRequest = HTTPRequest {
     method :: String,
@@ -63,9 +59,23 @@ httpRequest req = do
         Left err -> fail err
 
 
+-- | Messages sent through the HTTP stream queue
+data HTTPStreamMessage
+    = StreamHeader Int [(String, String)]   -- ^ Status code and headers (sent first)
+    | StreamChunk BS.ByteString             -- ^ Body chunk
+    | StreamEnd ByteString                  -- ^ End-of-stream with accumulated body (lazy)
+    | StreamError String                    -- ^ Connection/parse error
+    deriving (Show)
+
+-- | Result returned when an HTTP stream is closed
+data HTTPStreamResult = HTTPStreamResult
+    { streamStatusCode :: Int
+    , streamHeaders :: [(String, String)]
+    , streamBody :: ByteString              -- ^ Full concatenated body (lazy)
+    } deriving (Show)
+
 -- | HTTP streaming effect
--- Streams ByteString chunks, returns () when closed (TODO: capture status/headers)
-type HTTPStreaming = Streaming BS.ByteString () HTTPRequest
+type HTTPStreaming = Streaming BS.ByteString HTTPStreamResult HTTPRequest
 
 -- | Public result type for HTTP streaming
 type HTTPStreamedResult = StreamResult BS.ByteString
@@ -75,11 +85,11 @@ fetchChunk :: Member HTTPStreamedResult r => Sem r (Maybe BS.ByteString)
 fetchChunk = fetchNext
 
 -- | Make a streaming HTTP request with bracket-style resource management
--- Returns the action result and () (TODO: return status code and headers)
+-- Returns the action result and the HTTP stream result (status, headers, body)
 httpRequestStreaming :: forall r a. (Members '[HTTPStreaming, Fail] r)
                      => HTTPRequest
                      -> Sem (HTTPStreamedResult : r) a
-                     -> Sem r (a, ())
+                     -> Sem r (a, HTTPStreamResult)
 httpRequestStreaming = startStream
               
 
@@ -111,23 +121,29 @@ httpIO requestTransform = interpret $ \case
             }
 
 
+-- | Stream state: the queue plus status/headers captured at stream start
+data HTTPStreamState = HTTPStreamState
+    { hssQueue   :: TQueue HTTPStreamMessage
+    , hssStatus  :: Int
+    , hssHeaders :: [(String, String)]
+    }
+
 -- | HTTP streaming interpreter with connection management via STM
 -- Uses interpretStreamingStateful helper to manage stream state
 httpIOStreaming :: forall r a. (HasCallStack, Members '[Embed IO, Fail] r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
 httpIOStreaming requestTransform =
     interpretStreamingStateful onStart onFetch onClose
   where
-    -- Initialize: Create TQueue and fork HTTP request thread
+    -- Initialize: Create TQueue, fork HTTP request thread, wait for header
     onStart request = do
-        chunkQueue <- embed $ newTQueueIO
+        queue <- embed newTQueueIO
 
         -- Fork thread to make HTTP request and fill the queue
         _ <- embed $ forkIO $ do
             result <- CMC.try (parseRequest request.uri)
             case result of
-                Left (_ :: CMC.SomeException) -> do
-                    -- Signal error and end
-                    atomically $ writeTQueue chunkQueue Nothing
+                Left (e :: CMC.SomeException) ->
+                    atomically $ writeTQueue queue (StreamError (show e))
                 Right req -> do
                     let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
                     let hr :: Request =
@@ -139,23 +155,53 @@ httpIOStreaming requestTransform =
                                 Nothing -> id
                             $ req
 
-                    -- Make the request and write chunks to queue as they arrive
                     withResponse hr $ \respFull -> do
-                        runConduit $
+                        let status = getResponseStatusCode respFull
+                            hdrs' = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b))
+                                        (getResponseHeaders respFull)
+                        atomically $ writeTQueue queue (StreamHeader status hdrs')
+
+                        chunks <- runConduit $
                             responseBody respFull
-                            .| awaitForever (\chunk -> liftIO $ atomically $ writeTQueue chunkQueue (Just chunk))
-                        -- Signal end of stream
-                        atomically $ writeTQueue chunkQueue Nothing
+                            .| iterM (\chunk -> atomically $ writeTQueue queue (StreamChunk chunk))
+                            .| sinkList
 
-        return $ Right chunkQueue
+                        atomically $ writeTQueue queue (StreamEnd (BSL.fromChunks chunks))
 
-    -- Fetch: Read from TQueue
-    onFetch queue = do
-        mChunk <- embed $ atomically $ readTQueue queue
-        return (mChunk, queue)  -- Queue is unchanged
+        -- Wait for the first message: either StreamHeader or StreamError
+        firstMsg <- embed $ atomically $ readTQueue queue
+        case firstMsg of
+            StreamHeader status hdrs ->
+                return $ Right $ HTTPStreamState queue status hdrs
+            StreamError err ->
+                return $ Left err
+            -- Should not happen, but handle gracefully
+            _ -> return $ Left "Unexpected stream message before header"
 
-    -- Close: Nothing to do (queue will be garbage collected)
-    onClose _queue = return ()  -- TODO: Return status code and headers
+    -- Fetch: Read from TQueue, yield StreamChunk, end on StreamEnd
+    onFetch st = do
+        msg <- embed $ atomically $ readTQueue (hssQueue st)
+        case msg of
+            StreamChunk chunk -> return (Just chunk, st)
+            StreamEnd _ -> do
+                -- Put it back so onClose can retrieve the accumulated body
+                embed $ atomically $ unGetTQueue (hssQueue st) msg
+                return (Nothing, st)
+            StreamError _ -> do
+                embed $ atomically $ unGetTQueue (hssQueue st) msg
+                return (Nothing, st)
+            StreamHeader _ _ -> onFetch st  -- should not happen after start
+
+    -- Close: Build HTTPStreamResult from state + remaining queue messages
+    onClose st = do
+        msgs <- embed $ atomically $ flushTQueue (hssQueue st)
+        let body = bodyFrom msgs
+        return $ HTTPStreamResult (hssStatus st) (hssHeaders st) body
+
+    bodyFrom [] = BSL.empty
+    bodyFrom (StreamEnd b : _) = b
+    bodyFrom (StreamError e : _) = BSL.fromStrict (BS8.pack e)
+    bodyFrom (_ : rest) = bodyFrom rest
 
 -- | Convenience function - httpIO with no request transformation
 httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
