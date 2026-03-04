@@ -93,7 +93,7 @@ runGrepWithSecurity projectRoot allowedPath basePath pattern = do
     . fileSystemLocal proj
     . filterFileSystem @GrepTest (limitToSubpath allowedPath)
     . grepForFilesystem @GrepTest
-    $ grepSearch @GrepTest basePath pattern
+    $ grepSearch @GrepTest basePath pattern defaultGrepOptions
 
 -- | Run grep without security filter (for comparison)
 runGrepNoSecurity :: FilePath  -- ^ Project root (chroot)
@@ -110,7 +110,7 @@ runGrepNoSecurity projectRoot basePath pattern = do
     . System.filesystemIO
     . fileSystemLocal proj
     . grepForFilesystem @GrepTest
-    $ grepSearch @GrepTest basePath pattern
+    $ grepSearch @GrepTest basePath pattern defaultGrepOptions
 
 -- | Run grep using System interpreter (non-chrooted)
 runGrepSystem :: FilePath  -- ^ Search base path (system path)
@@ -124,7 +124,7 @@ runGrepSystem basePath pattern =
     . cmdsIO
     . System.filesystemReadIO
     . grepIO
-    $ grepSearch @() basePath pattern
+    $ grepSearch @() basePath pattern defaultGrepOptions
 
 --------------------------------------------------------------------------------
 -- Tests
@@ -302,7 +302,7 @@ spec = do
           . fileSystemLocal proj
           . filterFileSystem @GrepTest combinedFilter
           . grepForFilesystem @GrepTest
-          $ grepSearch @GrepTest "/" "content"
+          $ grepSearch @GrepTest "/" "content" defaultGrepOptions
 
         case result of
           Right matches -> do
