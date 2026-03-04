@@ -27,7 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Polysemy
 import Polysemy.Fail
-import UniversalLLM (Message(..), HasTools, SupportsSystemPrompt, ProviderOf, ModelConfig(..))
+import UniversalLLM (Message(..), HasTools, SupportsSystemPrompt, ProviderOf, ModelConfig(..), ToolCall(..), ToolResult(..))
 import Runix.LLM (LLM(..), queryLLM)
 import Data.Aeson (Value)
 
@@ -78,13 +78,23 @@ estimateValueTokens val =
   let jsonStr = T.pack $ show val
   in estimateTokens jsonStr
 
--- | Estimate tokens in a tool call (includes structure overhead)
-estimateToolCallTokens :: toolcall -> Int
-estimateToolCallTokens _ = 50  -- Conservative estimate for tool call structure
+-- | Estimate tokens in a tool call (includes name, id, and arguments)
+estimateToolCallTokens :: ToolCall -> Int
+estimateToolCallTokens (ToolCall tcId tcName tcArgs) =
+  -- Tool call ID + name + JSON arguments
+  estimateTokens tcId + estimateTokens tcName + estimateValueTokens tcArgs + 10  -- +10 for structure
+estimateToolCallTokens (InvalidToolCall tcId tcName rawArgs errMsg) =
+  -- Invalid tool call: ID + name + raw args + error message
+  estimateTokens tcId + estimateTokens tcName + estimateTokens rawArgs + estimateTokens errMsg + 10
 
--- | Estimate tokens in a tool result (includes structure overhead)
-estimateToolResultTokens :: toolresult -> Int
-estimateToolResultTokens _ = 100  -- Conservative estimate for tool result structure
+-- | Estimate tokens in a tool result (includes the call and output)
+estimateToolResultTokens :: ToolResult -> Int
+estimateToolResultTokens (ToolResult toolCall output) =
+  let callTokens = estimateToolCallTokens toolCall
+      outputTokens = case output of
+        Left errText -> estimateTokens errText
+        Right val -> estimateValueTokens val
+  in callTokens + outputTokens + 10  -- +10 for result structure
 
 --------------------------------------------------------------------------------
 -- Context Compaction
