@@ -41,6 +41,7 @@ module Runix.LLM.Interpreter
   , OpenAIAuth(..)
   , OpenRouterAuth(..)
   , ZAIAuth(..)
+  , AlibabaCloudAuth(..)
   , LlamaCppAuth(..)
     -- * Re-exports from universal-llm
   , module UniversalLLM
@@ -477,6 +478,15 @@ instance RestEndpoint ZAIAuth where
     apiroot _ = "https://api.z.ai/api/coding/paas/v4"
     authheaders api =
         [ ("Authorization", "Bearer " <> zaiApiKey api)
+        , ("Content-Type", "application/json")
+        ]
+
+data AlibabaCloudAuth = AlibabaCloudAuth { alibabaCloudApiKey :: String }
+
+instance RestEndpoint AlibabaCloudAuth where
+    apiroot _ = "https://coding-intl.dashscope.aliyuncs.com/v1"
+    authheaders api =
+        [ ("Authorization", "Bearer " <> alibabaCloudApiKey api)
         , ("Content-Type", "application/json")
         ]
 
