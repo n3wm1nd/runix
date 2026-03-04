@@ -460,7 +460,6 @@ instance RestEndpoint OpenAIAuth where
     apiroot _ = "https://api.openai.com/v1"
     authheaders api =
         [ ("Authorization", "Bearer " <> openaiApiKey api)
-        , ("Content-Type", "application/json")
         ]
 
 data OpenRouterAuth = OpenRouterAuth { openrouterApiKey :: String }
@@ -469,7 +468,6 @@ instance RestEndpoint OpenRouterAuth where
     apiroot _ = "https://openrouter.ai/api/v1"
     authheaders api =
         [ ("Authorization", "Bearer " <> openrouterApiKey api)
-        , ("Content-Type", "application/json")
         ]
 
 data ZAIAuth = ZAIAuth { zaiApiKey :: String }
@@ -478,7 +476,6 @@ instance RestEndpoint ZAIAuth where
     apiroot _ = "https://api.z.ai/api/coding/paas/v4"
     authheaders api =
         [ ("Authorization", "Bearer " <> zaiApiKey api)
-        , ("Content-Type", "application/json")
         ]
 
 data AlibabaCloudAuth = AlibabaCloudAuth { alibabaCloudApiKey :: String }
@@ -487,14 +484,13 @@ instance RestEndpoint AlibabaCloudAuth where
     apiroot _ = "https://coding-intl.dashscope.aliyuncs.com/v1"
     authheaders api =
         [ ("Authorization", "Bearer " <> alibabaCloudApiKey api)
-        , ("Content-Type", "application/json")
         ]
 
 data LlamaCppAuth = LlamaCppAuth { llamacppEndpoint :: String }
 
 instance RestEndpoint LlamaCppAuth where
     apiroot = llamacppEndpoint
-    authheaders _ = [("Content-Type", "application/json")]
+    authheaders _ = []
 
 -- ============================================================================
 -- Convenience Interpreters (bundle restapiHTTP)
