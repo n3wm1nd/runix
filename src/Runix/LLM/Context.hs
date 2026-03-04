@@ -218,8 +218,10 @@ compactQuick msgs =
 compressMessages :: [Message model] -> [Message model]
 compressMessages [] = []
 compressMessages (msg:rest) = case msg of
-  -- Strip existing system text (these are ephemeral reminders)
-  SystemText _ -> compressMessages rest
+  -- Strip existing system text, EXCEPT our tool call placeholders
+  SystemText txt
+    | isToolPlaceholder txt -> msg : compressMessages rest  -- Keep tool placeholders
+    | otherwise -> compressMessages rest  -- Strip ephemeral reminders
 
   -- Replace tool call + result with a compact reminder
   AssistantTool toolCall -> case rest of
@@ -235,6 +237,11 @@ compressMessages (msg:rest) = case msg of
 
   -- Keep all other messages as-is
   _ -> msg : compressMessages rest
+
+-- | Check if a system text is one of our tool call placeholders
+isToolPlaceholder :: Text -> Bool
+isToolPlaceholder txt =
+  T.isPrefixOf "[Tool:" txt || T.isPrefixOf "[Tool call pending:" txt || T.isPrefixOf "[Invalid tool" txt
 
 -- | Summarize a tool call and its result into a compact text reminder
 summarizeToolCall :: ToolCall -> ToolResult -> Text
