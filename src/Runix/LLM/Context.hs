@@ -43,56 +43,73 @@ newtype TokenCount = TokenCount Int
 -- Token Counting
 --------------------------------------------------------------------------------
 
--- | Count tokens in a list of messages
+-- | Count tokens in message history
 --
 -- This uses an approximation: ~4 characters per token for English text.
 -- This is a conservative estimate that works reasonably well for Claude models.
+--
+-- Note: This only counts the messages themselves, not system prompts or
+-- tool definitions passed via ModelConfig. To get the full context size:
+--   tokenCount msgs + estimateTokens systemPromptText + estimateTokens toolDefsText
 --
 -- For more accurate counting, you would need to use the actual tokenizer,
 -- but that requires model-specific dependencies.
 tokenCount :: [Message model] -> TokenCount
 tokenCount msgs = TokenCount $ sum $ map messageTokens msgs
 
--- | Estimate tokens in a single message
+-- | Estimate tokens in a single message (internal helper)
 messageTokens :: Message model -> Int
 messageTokens msg = case msg of
-  UserText txt -> estimateTokens txt
-  UserImage url desc -> estimateTokens url + estimateTokens desc
-  UserRequestJSON txt schema -> estimateTokens txt + estimateValueTokens schema
-  AssistantText txt -> estimateTokens txt
-  AssistantReasoning txt -> estimateTokens txt
+  UserText txt -> unTC $ estimateTokens txt
+  UserImage url desc -> unTC (estimateTokens url) + unTC (estimateTokens desc)
+  UserRequestJSON txt schema -> unTC (estimateTokens txt) + estimateValueTokens schema
+  AssistantText txt -> unTC $ estimateTokens txt
+  AssistantReasoning txt -> unTC $ estimateTokens txt
   AssistantTool toolCall -> estimateToolCallTokens toolCall
   AssistantJSON val -> estimateValueTokens val
-  SystemText txt -> estimateTokens txt
+  SystemText txt -> unTC $ estimateTokens txt
   ToolResultMsg toolResult -> estimateToolResultTokens toolResult
+  where
+    unTC (TokenCount n) = n
 
--- | Estimate tokens in text (4 chars ≈ 1 token)
-estimateTokens :: Text -> Int
-estimateTokens txt = (T.length txt + 3) `div` 4
+-- | Estimate tokens in raw text (4 chars ≈ 1 token)
+--
+-- Use this for counting tokens in system prompts, tool definitions,
+-- or any other text content that's not in the message history.
+estimateTokens :: Text -> TokenCount
+estimateTokens txt = TokenCount $ (T.length txt + 3) `div` 4
 
--- | Estimate tokens in a JSON Value
+-- | Estimate tokens in a JSON Value (internal helper)
 estimateValueTokens :: Value -> Int
 estimateValueTokens val =
   -- Simple approximation: count characters in JSON representation
   -- In reality, structured data often tokenizes more efficiently
   let jsonStr = T.pack $ show val
-  in estimateTokens jsonStr
+      TokenCount n = estimateTokens jsonStr
+  in n
 
--- | Estimate tokens in a tool call (includes name, id, and arguments)
+-- | Estimate tokens in a tool call (internal helper)
 estimateToolCallTokens :: ToolCall -> Int
 estimateToolCallTokens (ToolCall tcId tcName tcArgs) =
   -- Tool call ID + name + JSON arguments
-  estimateTokens tcId + estimateTokens tcName + estimateValueTokens tcArgs + 10  -- +10 for structure
+  let TokenCount idTokens = estimateTokens tcId
+      TokenCount nameTokens = estimateTokens tcName
+      argsTokens = estimateValueTokens tcArgs
+  in idTokens + nameTokens + argsTokens + 10  -- +10 for structure
 estimateToolCallTokens (InvalidToolCall tcId tcName rawArgs errMsg) =
   -- Invalid tool call: ID + name + raw args + error message
-  estimateTokens tcId + estimateTokens tcName + estimateTokens rawArgs + estimateTokens errMsg + 10
+  let TokenCount idTokens = estimateTokens tcId
+      TokenCount nameTokens = estimateTokens tcName
+      TokenCount argsTokens = estimateTokens rawArgs
+      TokenCount errTokens = estimateTokens errMsg
+  in idTokens + nameTokens + argsTokens + errTokens + 10
 
--- | Estimate tokens in a tool result (includes the call and output)
+-- | Estimate tokens in a tool result (internal helper)
 estimateToolResultTokens :: ToolResult -> Int
 estimateToolResultTokens (ToolResult toolCall output) =
   let callTokens = estimateToolCallTokens toolCall
       outputTokens = case output of
-        Left errText -> estimateTokens errText
+        Left errText -> let TokenCount n = estimateTokens errText in n
         Right val -> estimateValueTokens val
   in callTokens + outputTokens + 10  -- +10 for result structure
 
