@@ -20,7 +20,8 @@ module Runix.LLM.Context
   , tokenCount
   , estimateTokens
     -- * Context compaction
-  , compact
+  , compact             -- ^ LLM-based summarization (requires LLM effect)
+  , compactQuick        -- ^ Quick offline compression (strip tool results & system reminders)
   ) where
 
 import Data.Text (Text)
@@ -181,3 +182,75 @@ extractSummaryText msgs = T.unlines $ map extract msgs
     extract (AssistantText txt) = txt
     extract (AssistantReasoning txt) = txt
     extract _ = ""
+
+--------------------------------------------------------------------------------
+-- Quick Offline Compaction
+--------------------------------------------------------------------------------
+
+-- | Quick offline compression: strip tool results and system reminders
+--
+-- This is a lightweight, fast compression that:
+-- 1. Replaces AssistantTool + ToolResultMsg pairs with a SystemText reminder
+--    showing just the tool name and args (no large results like file contents)
+-- 2. Strips out existing SystemText messages (ephemeral reminders that can be
+--    inferred from context)
+-- 3. Adds a note that tool results were stripped (files may need re-reading)
+--
+-- This can significantly reduce token count for conversations with many
+-- tool calls, especially file reads.
+--
+-- Unlike 'compact', this is pure and doesn't require an LLM call.
+compactQuick :: [Message model] -> [Message model]
+compactQuick msgs =
+  let -- First pass: strip system reminders and replace tool calls
+      compressed = compressMessages msgs
+      -- Add header if we actually compressed anything
+      hasToolCalls = any isToolCall msgs
+      header = if hasToolCalls
+               then [SystemText "Note: Tool results have been stripped to reduce context size. Files may need to be re-read if their contents are needed."]
+               else []
+  in header ++ compressed
+  where
+    isToolCall (AssistantTool _) = True
+    isToolCall _ = False
+
+-- | Compress messages by stripping system reminders and replacing tool calls
+compressMessages :: [Message model] -> [Message model]
+compressMessages [] = []
+compressMessages (msg:rest) = case msg of
+  -- Strip existing system text (these are ephemeral reminders)
+  SystemText _ -> compressMessages rest
+
+  -- Replace tool call + result with a compact reminder
+  AssistantTool toolCall -> case rest of
+    -- Tool call followed by result: replace both with summary
+    (ToolResultMsg toolResult : rest') ->
+      let summary = summarizeToolCall toolCall toolResult
+      in SystemText summary : compressMessages rest'
+    -- Tool call without result: keep it but note it
+    _ -> SystemText (summarizeToolCallOnly toolCall) : compressMessages rest
+
+  -- Skip standalone tool results (shouldn't happen, but handle it)
+  ToolResultMsg _ -> compressMessages rest
+
+  -- Keep all other messages as-is
+  _ -> msg : compressMessages rest
+
+-- | Summarize a tool call and its result into a compact text reminder
+summarizeToolCall :: ToolCall -> ToolResult -> Text
+summarizeToolCall toolCall _toolResult =
+  -- Just show the call, not the result (which might be huge)
+  case toolCall of
+    ToolCall tcId tcName tcArgs ->
+      "[Tool: " <> tcName <> " (id: " <> tcId <> ") with args: " <> T.pack (show tcArgs) <> "]"
+    InvalidToolCall tcId tcName rawArgs errMsg ->
+      "[Invalid tool: " <> tcName <> " (id: " <> tcId <> ") - Error: " <> errMsg <> "]"
+
+-- | Summarize a tool call without result
+summarizeToolCallOnly :: ToolCall -> Text
+summarizeToolCallOnly toolCall =
+  case toolCall of
+    ToolCall tcId tcName tcArgs ->
+      "[Tool call pending: " <> tcName <> " (id: " <> tcId <> ") with args: " <> T.pack (show tcArgs) <> "]"
+    InvalidToolCall tcId tcName _ errMsg ->
+      "[Invalid tool call: " <> tcName <> " (id: " <> tcId <> ") - Error: " <> errMsg <> "]"
