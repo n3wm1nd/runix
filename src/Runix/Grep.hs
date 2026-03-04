@@ -38,11 +38,22 @@ data GrepMatch = GrepMatch
   , matchText :: Text
   } deriving (Show, Eq)
 
+-- | Options for grep search
+data GrepOptions = GrepOptions
+  { grepAfterContext  :: Maybe Int      -- ^ -A N: lines of context after match
+  , grepBeforeContext :: Maybe Int      -- ^ -B N: lines of context before match
+  , grepGlob         :: Maybe String   -- ^ --glob PATTERN: filter files by glob
+  } deriving (Show, Eq)
+
+-- | Default grep options (no context, no glob filter)
+defaultGrepOptions :: GrepOptions
+defaultGrepOptions = GrepOptions Nothing Nothing Nothing
+
 -- | Grep effect for searching file contents
 -- Parameterized by project/filesystem type to work with chrooted filesystems
 data Grep project (m :: Type -> Type) a where
-    -- Search for pattern in files under basePath
-    GrepSearch :: FilePath -> String -> Grep project m [GrepMatch]
+    -- Search for pattern in files under basePath with options
+    GrepSearch :: FilePath -> String -> GrepOptions -> Grep project m [GrepMatch]
 
 makeSem ''Grep
 
@@ -54,9 +65,14 @@ type GrepSystem = Grep ()
 -- Works with non-parameterized System.FileSystemRead
 grepIOVerbose :: HasCallStack => Members [Cmds, FileSystemRead, Logging, Fail] r => Sem (GrepSystem : r) a -> Sem r a
 grepIOVerbose = interpret $ \case
-    GrepSearch basePath pattern -> do
+    GrepSearch basePath pattern opts -> do
         info $ fromString "grep search: " <> fromString pattern <> fromString " in " <> fromString basePath
-        result <- cmdsExec "rg" ["--line-number", "--with-filename", "--", pattern, basePath]
+        -- Build ripgrep arguments from options
+        let contextArgs = maybe [] (\n -> ["-A", show n]) (grepAfterContext opts)
+                       ++ maybe [] (\n -> ["-B", show n]) (grepBeforeContext opts)
+            globArgs = maybe [] (\g -> ["--glob", g]) (grepGlob opts)
+            baseArgs = ["--line-number", "--with-filename"] ++ contextArgs ++ globArgs ++ ["--", pattern, basePath]
+        result <- cmdsExec "rg" baseArgs
         let allMatches = case CmdE.exitCode result of
                 0 -> parseRipgrepOutput $ lines $ T.unpack $ CmdE.stdout result
                 _ -> []
@@ -99,7 +115,7 @@ grepForFilesystemVerbose :: forall project r a.
                          => Sem (Grep project : r) a
                          -> Sem r a
 grepForFilesystemVerbose = interpret $ \case
-    GrepSearch basePath pattern -> do
+    GrepSearch basePath pattern opts -> do
         -- Get project configuration and virtual CWD
         proj <- FS.getFileSystem @project
         virtualCwd <- FS.getCwd @project
@@ -115,8 +131,14 @@ grepForFilesystemVerbose = interpret $ \case
         -- If the filter blocks access, this will fail
         _ <- FS.isDirectory @project basePath
 
+        -- Build ripgrep arguments from options
+        let contextArgs = maybe [] (\n -> ["-A", show n]) (grepAfterContext opts)
+                       ++ maybe [] (\n -> ["-B", show n]) (grepBeforeContext opts)
+            globArgs = maybe [] (\g -> ["--glob", g]) (grepGlob opts)
+            baseArgs = ["--line-number", "--with-filename"] ++ contextArgs ++ globArgs ++ ["--", pattern, systemBasePath]
+
         -- Run ripgrep with system path
-        result <- cmdsExec "rg" ["--line-number", "--with-filename", "--", pattern, systemBasePath]
+        result <- cmdsExec "rg" baseArgs
         let allMatches = case CmdE.exitCode result of
                 0 -> parseRipgrepOutput $ lines $ T.unpack $ CmdE.stdout result
                 _ -> []
