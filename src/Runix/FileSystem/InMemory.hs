@@ -20,7 +20,6 @@ module Runix.FileSystem.InMemory
 
 import Polysemy
 import Polysemy.Error
-import qualified Data.ByteString as BS
 import Data.ByteString (ByteString)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)

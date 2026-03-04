@@ -52,7 +52,7 @@ import GHC.Stack
 import qualified System.Directory
 import qualified System.FilePath.Glob as Glob
 import Runix.Logging (Logging, info, loggingNull)
-import System.IO.Error (tryIOError, userError)
+import System.IO.Error (tryIOError)
 
 -- | Read-only filesystem operations
 data FileSystemRead (m :: Type -> Type) a where

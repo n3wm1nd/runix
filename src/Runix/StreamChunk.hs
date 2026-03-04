@@ -13,7 +13,6 @@ module Runix.StreamChunk where
 
 import Polysemy
 import Polysemy.State
-import Polysemy.Fail
 import Data.Kind (Type)
 
 -- | Effect for emitting streaming chunks

@@ -11,7 +11,6 @@ module Runix.Streaming.SSE.Conduit
 
 import Conduit
 import qualified Data.ByteString as BS
-import Data.ByteString (ByteString)
 
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 

@@ -28,7 +28,7 @@ import qualified Control.Monad.Catch as CMC
 import Data.CaseInsensitive (original)
 import Network.HTTP.Client.Conduit (RequestBody(RequestBodyLBS), responseTimeoutMicro, responseBody)
 import Runix.Logging (Logging, info)
-import Runix.Streaming (Streaming(..), StreamResult(..), StreamId(..), fetchNext, startStream, interpretStreamingStateful)
+import Runix.Streaming (Streaming(..), StreamResult(..), fetchNext, startStream, interpretStreamingStateful)
 import Conduit
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM

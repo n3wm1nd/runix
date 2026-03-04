@@ -19,7 +19,6 @@ import Data.String (fromString)
 import Data.Maybe (mapMaybe)
 import Control.Monad (filterM)
 import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
 import Polysemy
 import Polysemy.Fail (Fail)
 import GHC.Stack

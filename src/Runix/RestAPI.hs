@@ -19,9 +19,6 @@ import Data.Aeson
 import Data.Kind (Type)
 import GHC.Stack
 import Runix.HTTP
-import Runix.StreamChunk (StreamChunk)
-import Runix.Cancellation (Cancellation)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import System.FilePath
 

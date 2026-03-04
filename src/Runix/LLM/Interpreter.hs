@@ -55,7 +55,7 @@ import Polysemy
 import Polysemy.Fail
 import Polysemy.State (State, evalState, get, put)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
-import Data.Aeson (Value, encode, eitherDecodeStrict)
+import Data.Aeson (Value, encode)
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
