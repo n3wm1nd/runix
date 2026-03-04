@@ -404,6 +404,18 @@ fileSystemLocal :: forall project r a.
 fileSystemLocal project action =
   fileSystemFromSystem project (chrootFileSystem action)
 
+-- | Ensure a directory exists on the parent filesystem
+-- Use this before interpreting a child filesystem to ensure its root exists
+ensureDirectoryExists :: forall parent r a.
+                         Members [FileSystemWrite parent, Fail] r
+                      => FilePath  -- ^ Directory path to create
+                      -> Sem r a
+                      -> Sem r a
+ensureDirectoryExists path action = do
+  -- Create directory with parents if it doesn't exist
+  createDirectory @parent True path
+  action
+
 --------------------------------------------------------------------------------
 -- Filters
 --------------------------------------------------------------------------------
