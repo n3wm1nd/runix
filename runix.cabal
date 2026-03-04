@@ -79,6 +79,7 @@ library
         Runix.RestAPI,
         Runix.LLM,
         Runix.LLMStream,
+        Runix.LLM.Context,
         Runix.LLM.Interpreter,
         Runix.LLM.ToolInstances,
         Runix.LLM.ToolExecution,
