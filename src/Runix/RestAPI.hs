@@ -51,6 +51,10 @@ patch endpoint body = restRequest "PATCH" endpoint (Just body)
 class RestEndpoint p where
     apiroot :: p -> String
     authheaders :: p -> [(String, String)]
+    -- | User-Agent header value for this client
+    -- Default is "runix/0.1" but applications should override to identify themselves
+    useragent :: p -> String
+    useragent _ = "runix/0.1"
 
 -- | Build an HTTPRequest from RestEndpoint configuration
 makeHTTPRequest :: (RestEndpoint p, ToJSON r) => p -> String -> Endpoint -> Maybe r -> HTTPRequest
@@ -58,7 +62,9 @@ makeHTTPRequest api method (Endpoint endpoint) body =
     HTTPRequest
         { method = method
         , uri = apiroot api </> endpoint
-        , headers = ("Content-Type", "application/json") : authheaders api
+        , headers = ("Content-Type", "application/json")
+                  : ("User-Agent", useragent api)
+                  : authheaders api
         , body = fmap encode body
         }
 

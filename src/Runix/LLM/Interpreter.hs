@@ -279,7 +279,9 @@ interpretLLMStream api composableProvider model defaultConfigs action =
             httpReq = HTTPRequest
                 { method = "POST"
                 , uri = apiroot api <> "/" <> case protocolEndpoint @(ProviderResponse model) of Endpoint p -> p
-                , headers = authheaders api ++ [("Content-Type", "application/json")]
+                , headers = ("Content-Type", "application/json")
+                          : ("User-Agent", useragent api)
+                          : authheaders api
                 , body = Just requestValue
                 }
 
