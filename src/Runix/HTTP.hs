@@ -139,34 +139,37 @@ httpIOStreaming requestTransform =
         queue <- embed newTQueueIO
 
         -- Fork thread to make HTTP request and fill the queue
+        -- Wrap entire thread in exception handler to catch ALL exceptions (not just parseRequest)
         _ <- embed $ forkIO $ do
-            result <- CMC.try (parseRequest request.uri)
+            result <- CMC.try $ do
+                req <- parseRequest request.uri
+                let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
+                let hr :: Request =
+                        setRequestMethod (fromString request.method) .
+                        setRequestHeaders hdrs .
+                        requestTransform .
+                        case request.body of
+                            Just b -> setRequestBody (RequestBodyLBS b)
+                            Nothing -> id
+                        $ req
+
+                withResponse hr $ \respFull -> do
+                    let status = getResponseStatusCode respFull
+                        hdrs' = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b))
+                                    (getResponseHeaders respFull)
+                    atomically $ writeTQueue queue (StreamHeader status hdrs')
+
+                    chunks <- runConduit $
+                        responseBody respFull
+                        .| iterM (\chunk -> atomically $ writeTQueue queue (StreamChunk chunk))
+                        .| sinkList
+
+                    atomically $ writeTQueue queue (StreamEnd (BSL.fromChunks chunks))
+
             case result of
                 Left (e :: CMC.SomeException) ->
                     atomically $ writeTQueue queue (StreamError (show e))
-                Right req -> do
-                    let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
-                    let hr :: Request =
-                            setRequestMethod (fromString request.method) .
-                            setRequestHeaders hdrs .
-                            requestTransform .
-                            case request.body of
-                                Just b -> setRequestBody (RequestBodyLBS b)
-                                Nothing -> id
-                            $ req
-
-                    withResponse hr $ \respFull -> do
-                        let status = getResponseStatusCode respFull
-                            hdrs' = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b))
-                                        (getResponseHeaders respFull)
-                        atomically $ writeTQueue queue (StreamHeader status hdrs')
-
-                        chunks <- runConduit $
-                            responseBody respFull
-                            .| iterM (\chunk -> atomically $ writeTQueue queue (StreamChunk chunk))
-                            .| sinkList
-
-                        atomically $ writeTQueue queue (StreamEnd (BSL.fromChunks chunks))
+                Right () -> return ()
 
         -- Wait for the first message: either StreamHeader or StreamError
         firstMsg <- embed $ atomically $ readTQueue queue
@@ -174,7 +177,7 @@ httpIOStreaming requestTransform =
             StreamHeader status hdrs ->
                 return $ Right $ HTTPStreamState queue status hdrs
             StreamError err ->
-                return $ Left err
+                return $ Left $ "HTTP connection error: " ++ err
             -- Should not happen, but handle gracefully
             _ -> return $ Left "Unexpected stream message before header"
 
@@ -193,14 +196,26 @@ httpIOStreaming requestTransform =
             StreamHeader _ _ -> onFetch st  -- should not happen after start
 
     -- Close: Build HTTPStreamResult from state + remaining queue messages
+    -- Check for errors in the remaining messages and construct appropriate result
     onClose st = do
         msgs <- embed $ atomically $ flushTQueue (hssQueue st)
-        let body = bodyFrom msgs
-        return $ HTTPStreamResult (hssStatus st) (hssHeaders st) body
+        case errorFrom msgs of
+            Just err ->
+                -- Stream ended with error - return 500 status with error in body
+                return $ HTTPStreamResult 500 [("X-Stream-Error", "true")] (BSL.fromStrict (BS8.pack err))
+            Nothing ->
+                -- Normal completion - return actual status from header
+                let body = bodyFrom msgs
+                in return $ HTTPStreamResult (hssStatus st) (hssHeaders st) body
 
+    -- Extract error message if stream ended with error
+    errorFrom [] = Nothing
+    errorFrom (StreamError e : _) = Just $ "HTTP stream error: " ++ e
+    errorFrom (_ : rest) = errorFrom rest
+
+    -- Extract successful body
     bodyFrom [] = BSL.empty
     bodyFrom (StreamEnd b : _) = b
-    bodyFrom (StreamError e : _) = BSL.fromStrict (BS8.pack e)
     bodyFrom (_ : rest) = bodyFrom rest
 
 -- | Convenience function - httpIO with no request transformation
