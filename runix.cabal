@@ -77,6 +77,7 @@ library
         Runix.Streaming.SSE.Conduit,
         Runix.HTTP,
         Runix.RestAPI,
+        Runix.LangFuse,
         Runix.Time,
         Runix.LLM,
         Runix.LLMStream,
@@ -103,7 +104,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, http-client, http-types, case-insensitive, conduit, exceptions, autodocodec, autodocodec-schema, universal-llm, Glob, stm, vector, data-default, containers, time, hinotify
+    build-depends:    base, polysemy >=1.9, bytestring, temporary, text,filepath, directory, Cabal, Cabal-syntax, polysemy-plugin, aeson, process, http-conduit, http-client, http-types, case-insensitive, conduit, exceptions, autodocodec, autodocodec-schema, universal-llm, Glob, stm, vector, data-default, containers, time, hinotify, base64-bytestring
 
     -- Directories containing source files.
     hs-source-dirs:   src
@@ -132,6 +133,7 @@ test-suite runix-test
                     , DummyFileSystemSpec
                     , GrepSecuritySpec
                     , HTTPStreamingInterceptorSpec
+                    , LangFuseSpec
     autogen-modules:  Paths_runix
 
     -- LANGUAGE extensions used by modules in this package.
@@ -167,4 +169,5 @@ test-suite runix-test
         containers,
         filepath,
         Glob,
-        temporary
+        temporary,
+        time

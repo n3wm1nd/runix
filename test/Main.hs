@@ -52,6 +52,7 @@ import qualified GrepSecuritySpec
 import qualified PathResolutionSpec
 import qualified ChrootTranslationSpec
 import qualified HTTPStreamingInterceptorSpec
+import qualified LangFuseSpec
 
 -- ============================================================================
 -- Test Models
@@ -184,6 +185,8 @@ main = do
     describe "SSE Parser Unit Tests" SSEParserSpec.spec
 
     describe "HTTP Streaming Interceptors" HTTPStreamingInterceptorSpec.spec
+
+    LangFuseSpec.spec
 
     describe "Runix OpenAI Streaming (Mocked HTTP)" OpenAIStreamingSpec.spec
 
