@@ -12,6 +12,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE DerivingStrategies #-}
 
 -- | Parameterized filesystem effects for multiple project support
 --
@@ -692,6 +693,15 @@ loggingWrite prefix = intercept $ \case
 -- FileWatcher Effect (Parameterized)
 --------------------------------------------------------------------------------
 
+-- | A file change detected by the file watcher
+-- Parameterized by filesystem type to ensure type safety
+data FileChange fs = FileChange
+  { changePath :: FilePath
+  , changeOldContent :: ByteString
+  , changeNewContent :: ByteString
+  }
+  deriving stock (Show, Eq)
+
 -- | File watching effect for tracking changes to accessed files
 -- Parameterized by project type, works with project-relative paths
 data FileWatcher project (m :: Type -> Type) a where
@@ -699,8 +709,8 @@ data FileWatcher project (m :: Type -> Type) a where
     WatchFile :: FilePath -> FileWatcher project m ()
 
     -- | Get list of watched files that have changed since last check
-    -- Returns [(FilePath, OldContent, NewContent)] for each changed file
-    GetChangedFiles :: FileWatcher project m [(FilePath, ByteString, ByteString)]
+    -- Returns [FileChange project] for each changed file
+    GetChangedFiles :: FileWatcher project m [FileChange project]
 
     -- | Clear the list of watched files
     ClearWatched :: FileWatcher project m ()
@@ -778,11 +788,11 @@ fileWatcherGeneric action = fmap snd $ runState emptyWatcherStateGeneric $ reint
             case contentResult of
                 Left _ -> return Nothing  -- File no longer exists or can't be accessed
                 Right newContent
-                    | newContent /= oldContent -> return $ Just (path, oldContent, newContent)
+                    | newContent /= oldContent -> return $ Just $ FileChange path oldContent newContent
                     | otherwise -> return Nothing
 
         -- Update state with new content for changed files
-        let updatedContent = Map.fromList [(path, newContent) | (path, _old, newContent) <- changedFiles]
+        let updatedContent = Map.fromList [(changePath fc, changeNewContent fc) | fc <- changedFiles]
         WatcherStateGeneric currentWatched <- get @WatcherStateGeneric
         let finalWatched = Map.union updatedContent currentWatched
         put $ WatcherStateGeneric finalWatched
@@ -843,15 +853,15 @@ fileWatcherIO action = fmap snd $ runState emptyWatcherState $ reinterpret (\cas
                             case contentResult of
                                 Left _ -> return Nothing
                                 Right newContent
-                                    | newContent /= oldContent -> return $ Just (path, oldContent, newContent)
+                                    | newContent /= oldContent -> return $ Just $ FileChange path oldContent newContent
                                     | otherwise -> return Nothing
                         | otherwise -> return Nothing
 
             -- Update state with new mtimes and content for changed files
-            updatedWithMtimes <- embed $ fmap Map.fromList $ forM changedFiles $ \(path, _oldContent, newContent) -> do
-                let systemPath = projectToSystemPath proj path
+            updatedWithMtimes <- embed $ fmap Map.fromList $ forM changedFiles $ \fc -> do
+                let systemPath = projectToSystemPath proj (changePath fc)
                 mtime <- System.Directory.getModificationTime systemPath
-                return (path, (mtime, newContent))
+                return (changePath fc, (mtime, changeNewContent fc))
 
             WatcherState currentWatched <- get @WatcherState
             let finalWatched = Map.union updatedWithMtimes currentWatched
@@ -940,13 +950,13 @@ fileWatcherINotify action = do
                         case contentResult of
                             Left _ -> return Nothing  -- File disappeared
                             Right newContent
-                                | newContent /= oldContent -> return $ Just (path, oldContent, newContent)
+                                | newContent /= oldContent -> return $ Just $ FileChange path oldContent newContent
                                 | otherwise -> return Nothing
             -- Update stored content for files that actually changed
             embed $ atomically $ modifyTVar' stateVar $ \s ->
-                let updates = Map.fromList [(p, (nc, wd))
-                                           | (p, _old, nc) <- changedFiles
-                                           , Just (_c, wd) <- [Map.lookup p (inWatched s)]]
+                let updates = Map.fromList [(changePath fc, (changeNewContent fc, wd))
+                                           | fc <- changedFiles
+                                           , Just (_c, wd) <- [Map.lookup (changePath fc) (inWatched s)]]
                 in s { inWatched = Map.union updates (inWatched s) }
             return changedFiles
 

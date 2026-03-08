@@ -82,7 +82,7 @@ remove = Parameterized.remove
 watchFile :: Member FileWatcher r => FilePath -> Sem r ()
 watchFile = Parameterized.watchFile
 
-getChangedFiles :: Member FileWatcher r => Sem r [(FilePath, ByteString, ByteString)]
+getChangedFiles :: Member FileWatcher r => Sem r [Parameterized.FileChange Default]
 getChangedFiles = Parameterized.getChangedFiles
 
 clearWatched :: Member FileWatcher r => Sem r ()
