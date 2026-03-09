@@ -300,6 +300,38 @@ spec = describe "LangFuse OpenTelemetry Integration" $ do
       show payload `shouldContain` "input_tokens"
       show payload `shouldContain` "output_tokens"
 
+    it "includes tool call information in OpenInference format for streaming OpenAI response" $ do
+      let sseBody = BSL.concat
+            [ "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n"
+            , "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\"\"}}]}}]}\n\n"
+            , "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"London\\\"}\"}}]}}]}\n\n"
+            , "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50}}\n\n"
+            , "data: [DONE]\n\n"
+            ]
+          toolCallResponse = HTTPResponse 200 [("Content-Type", "text/event-stream")] sseBody
+          toolCallRequest = openaiRequest
+
+      let (_httpReqs, otlpTraces) = runTest toolCallResponse $
+            withLangFuse mockLangFuse $ do
+              _ <- send $ HttpRequest toolCallRequest
+              return ()
+
+      let payload = capturedPayload $ head otlpTraces
+          payloadStr = show payload
+
+      -- Debug: print the payload
+      putStrLn "\n=== OTLP Payload for Tool Calls ==="
+      putStrLn payloadStr
+
+      -- Should contain OpenInference attributes for tool calls
+      payloadStr `shouldContain` "llm.output_messages.0.message.role"
+      payloadStr `shouldContain` "llm.output_messages.0.message.tool_calls.0.tool_call.function.name"
+      payloadStr `shouldContain` "get_weather"
+      payloadStr `shouldContain` "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments"
+      payloadStr `shouldContain` "London"
+      payloadStr `shouldContain` "llm.output_messages.0.message.tool_calls.0.tool_call.id"
+      payloadStr `shouldContain` "call_abc"
+
   describe "Error Handling" $ do
     it "handles HTTP errors gracefully" $ do
       let errorResponse = HTTPResponse

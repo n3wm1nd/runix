@@ -127,6 +127,7 @@ test-suite runix-test
     other-modules:    Paths_runix
                     , OpenAIStreamingSpec
                     , SSEParserSpec
+                    , SSEToJSONSpec
                     , PathResolutionSpec
                     , ChrootTranslationSpec
                     , FileSystemSecuritySpec

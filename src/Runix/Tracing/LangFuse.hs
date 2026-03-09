@@ -43,6 +43,8 @@ module Runix.Tracing.LangFuse
   , buildSpanWithSession
   , mkExportRequest
   , ExportTraceServiceRequest(..)
+  , parseSSEToJSON
+  , outputAttributes
   ) where
 
 import Polysemy
@@ -60,6 +62,7 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Base64 as B64
 import Data.String (IsString, fromString)
 import Data.Foldable (toList)
+import Data.Maybe (listToMaybe, fromMaybe)
 import System.Environment (lookupEnv)
 
 import Runix.HTTP (HTTP(..), HTTPRequest(..), HTTPResponse(..), HTTPStreaming, HTTPStreamResult(..))
@@ -412,50 +415,49 @@ extractOpenAIContent (Aeson.Array arr) =
   in if null textParts then Nothing else Just (T.concat textParts)
 extractOpenAIContent _ = Nothing
 
--- | Parse SSE streaming body and merge all JSON deltas, extracting just the content text
--- Tries Anthropic protocol first, then OpenAI protocol, then falls back to Nothing
-parseSSEToJSON :: BSL.ByteString -> Maybe (Text, Maybe Value)
+-- | Parse SSE streaming body and merge all JSON deltas, returning full merged response as JSON
+-- Detects protocol from SSE data, then merges using appropriate protocol
+-- Returns (merged JSON Value, maybe usage)
+parseSSEToJSON :: BSL.ByteString -> Maybe (Value, Maybe Value)
 parseSSEToJSON bodyBytes =
   let SSEParseResult sseEvents _remainder = parseSSEChunks (BSL.toStrict bodyBytes)
       -- Parse all SSE events as JSON values
       jsonValues = [val | event <- sseEvents, Just val <- [decode (BSL.fromStrict (sseEventData event))]]
   in case jsonValues of
        [] -> Nothing
-       _ ->
-         -- Try Anthropic protocol
-         let anthropicInit = AnthropicSuccess $ AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
-             anthropicMerged = foldl mergeAnthropicDelta anthropicInit jsonValues
-             anthropicJSON = toJSONViaCodec anthropicMerged
-         in case anthropicJSON of
-              Aeson.Object obj ->
-                case (KM.lookup "content" obj >>= extractAnthropicContent, KM.lookup "usage" obj) of
-                  (Just content, usage) -> Just (content, usage)
-                  _ ->
-                    -- Try OpenAI protocol
-                    let openaiInit = OpenAISuccess $ defaultOpenAISuccessResponse
-                          { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
-                        openaiMerged = foldl mergeOpenAIDelta openaiInit jsonValues
-                        openaiJSON = toJSONViaCodec openaiMerged
-                    in case openaiJSON of
-                         Aeson.Object obj2 ->
-                           case (KM.lookup "choices" obj2 >>= extractOpenAIContent, KM.lookup "usage" obj2) of
-                             (Just content, usage) -> Just (content, usage)
-                             _ -> Nothing
-                         _ -> Nothing
-              _ ->
-                -- Try OpenAI protocol
-                let openaiInit = OpenAISuccess $ defaultOpenAISuccessResponse
-                      { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
-                    openaiMerged = foldl mergeOpenAIDelta openaiInit jsonValues
-                    openaiJSON = toJSONViaCodec openaiMerged
-                in case openaiJSON of
-                     Aeson.Object obj ->
-                       case (KM.lookup "choices" obj >>= extractOpenAIContent, KM.lookup "usage" obj) of
-                         (Just content, usage) -> Just (content, usage)
-                         _ -> Nothing
-                     _ -> Nothing
+       (firstChunk:_) ->
+         -- Detect protocol from first chunk structure
+         -- OpenAI chunks have "choices" field, Anthropic chunks have "type" field
+         case firstChunk of
+           Aeson.Object km
+             | KM.member "choices" km ->
+                 -- OpenAI protocol
+                 let openaiInit = OpenAISuccess $ defaultOpenAISuccessResponse
+                       { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
+                     openaiMerged = foldl mergeOpenAIDelta openaiInit jsonValues
+                     -- Extract usage from chunks (it's at root level, not in delta)
+                     maybeUsage = listToMaybe [u | Aeson.Object obj <- jsonValues, Just u <- [KM.lookup "usage" obj]]
+                     openaiJSON = toJSONViaCodec openaiMerged
+                 in case openaiJSON of
+                      obj@(Aeson.Object km2) ->
+                        -- Merge usage into the response if we found it
+                        let finalJSON = case maybeUsage of
+                              Just usage -> Aeson.Object $ KM.insert "usage" usage km2
+                              Nothing -> obj
+                        in Just (finalJSON, maybeUsage)
+                      _ -> Nothing
+             | KM.member "type" km ->
+                 -- Anthropic protocol
+                 let anthropicInit = AnthropicSuccess $ AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+                     anthropicMerged = foldl mergeAnthropicDelta anthropicInit jsonValues
+                     anthropicJSON = toJSONViaCodec anthropicMerged
+                 in case anthropicJSON of
+                      obj@(Aeson.Object km2) -> Just (obj, KM.lookup "usage" km2)
+                      _ -> Nothing
+             | otherwise -> Nothing
+           _ -> Nothing
 
--- | Parse response body for GenAI attributes
+-- | Parse response body for GenAI attributes using OpenInference format
 outputAttributes :: Either String HTTPResponse -> [(Text, Value)]
 outputAttributes = \case
   Right resp -> parseResponseBody resp.body
@@ -465,35 +467,183 @@ outputAttributes = \case
       case eitherDecode bodyBytes of
         Right (Aeson.Object obj) ->
           -- Direct JSON response (non-streaming)
-          -- Extract content text for better LangFuse rendering
-          let contentText = extractDirectContent bodyBytes obj
-              outputAttr = [("langfuse.observation.output", Aeson.String contentText)]
-              usageAttr = maybe [] (\u -> [("gen_ai.usage", u)]) $ KM.lookup "usage" obj
-          in outputAttr <> usageAttr
+          extractOutputMessages obj
         _ ->
-          -- Not direct JSON - try parsing as SSE
+          -- Not direct JSON - try parsing as SSE and merging
           case parseSSEToJSON bodyBytes of
-            Just (contentText, maybeUsage) ->
-              -- Successfully merged SSE deltas and extracted content
-              let outputAttr = [("langfuse.observation.output", Aeson.String contentText)]
-                  usageAttr = maybe [] (\u -> [("gen_ai.usage", u)]) maybeUsage
-              in outputAttr <> usageAttr
+            Just (mergedJSON, _maybeUsage) ->
+              case mergedJSON of
+                Aeson.Object obj -> extractOutputMessages obj
+                _ -> []
             Nothing ->
-              -- Couldn't parse as SSE/JSON - include raw body
-              [("langfuse.observation.output", Aeson.String $ bytesToText bodyBytes)]
+              -- Parse failed
+              []
 
-    -- Extract content from direct (non-streaming) JSON response
-    extractDirectContent bodyBytes obj =
-      -- Try Anthropic format first
-      case KM.lookup "content" obj >>= extractAnthropicContent of
-        Just txt -> txt
-        Nothing ->
-          -- Try OpenAI format
-          case KM.lookup "choices" obj >>= extractOpenAIContent of
-            Just txt -> txt
-            Nothing -> bytesToText bodyBytes  -- Fallback to raw JSON
+    -- Extract llm.output_messages.* attributes from response JSON (OpenAI or Anthropic format)
+    extractOutputMessages :: KM.KeyMap Value -> [(Text, Value)]
+    extractOutputMessages obj =
+      let usageAttr = maybe [] (\u -> [("gen_ai.usage", u)]) $ KM.lookup "usage" obj
+      in case (KM.lookup "choices" obj, KM.lookup "content" obj) of
+           -- OpenAI format: has "choices" array
+           (Just (Aeson.Array choices), _) ->
+             let openInferenceAttrs = concatMap extractFromChoice (zip [0::Int ..] (toList choices))
+                 -- Convert to gen_ai.output.messages format (OpenTelemetry GenAI spec)
+                 genAiMessages = convertOpenAIToGenAI (toList choices)
+                 genAiAttr = [("gen_ai.output.messages", Aeson.toJSON genAiMessages)]
+                 -- Also send langfuse.observation.output for compatibility
+                 outputAttr = case toList choices of
+                   (Aeson.Object choice : _) ->
+                     case KM.lookup "message" choice of
+                       Just msg -> [("langfuse.observation.output", Aeson.String $ TE.decodeUtf8 $ BSL.toStrict $ Aeson.encode msg)]
+                       Nothing -> []
+                   _ -> []
+             in genAiAttr <> outputAttr <> openInferenceAttrs <> usageAttr
+           -- Anthropic format: has "content" array and "role"
+           (_, Just content) ->
+             let anthropicAttrs = extractFromAnthropicMessage obj
+                 -- Convert to gen_ai.output.messages format
+                 genAiMessages = convertAnthropicToGenAI obj
+                 genAiAttr = [("gen_ai.output.messages", Aeson.toJSON genAiMessages)]
+                 outputAttr = [("langfuse.observation.output", Aeson.String $ TE.decodeUtf8 $ BSL.toStrict $ Aeson.encode $ Aeson.Object obj)]
+             in genAiAttr <> outputAttr <> anthropicAttrs <> usageAttr
+           _ -> usageAttr
 
-    bytesToText = TE.decodeUtf8 . BSL.toStrict
+    -- Convert OpenAI format to OpenTelemetry gen_ai.output.messages format
+    convertOpenAIToGenAI :: [Value] -> [Value]
+    convertOpenAIToGenAI choices = map convertChoice (toList choices)
+      where
+        convertChoice (Aeson.Object choice) =
+          case KM.lookup "message" choice of
+            Just (Aeson.Object msg) ->
+              let role = KM.lookup "role" msg
+                  content = KM.lookup "content" msg
+                  toolCalls = KM.lookup "tool_calls" msg
+                  parts = convertParts content toolCalls
+                  finishReason = KM.lookup "finish_reason" choice
+                  baseMsg = object $ [("role", r) | Just r <- [role]] <> [("parts", Aeson.toJSON parts)]
+                  withFinish = case finishReason of
+                    Just fr -> KM.insert "finish_reason" fr (case baseMsg of Aeson.Object o -> o; _ -> KM.empty)
+                    Nothing -> case baseMsg of Aeson.Object o -> o; _ -> KM.empty
+              in Aeson.Object withFinish
+            _ -> Aeson.Object KM.empty
+        convertChoice _ = Aeson.Object KM.empty
+
+        convertParts :: Maybe Value -> Maybe Value -> [Value]
+        convertParts content toolCalls =
+          let textParts = case content of
+                Just (Aeson.String txt) | not (T.null txt) ->
+                  [object [("type", Aeson.String "text"), ("content", Aeson.String txt)]]
+                _ -> []
+              toolParts = case toolCalls of
+                Just (Aeson.Array tcs) -> map convertToolCall (toList tcs)
+                _ -> []
+          in textParts <> toolParts
+
+        convertToolCall :: Value -> Value
+        convertToolCall (Aeson.Object tc) =
+          let tcId = KM.lookup "id" tc
+              tcType = KM.lookup "type" tc
+              function = KM.lookup "function" tc
+              (name, args) = case function of
+                Just (Aeson.Object f) ->
+                  let n = KM.lookup "name" f
+                      a = case KM.lookup "arguments" f of
+                        Just (Aeson.String argStr) ->
+                          -- Parse JSON string to object
+                          case eitherDecode (BSL.fromStrict $ TE.encodeUtf8 argStr) of
+                            Right v -> Just v
+                            Left _ -> Just (Aeson.String argStr)
+                        Just v -> Just v
+                        Nothing -> Nothing
+                  in (n, a)
+                _ -> (Nothing, Nothing)
+          in object $
+               [("type", Aeson.String "tool_call")] <>
+               [("id", i) | Just i <- [tcId]] <>
+               [("name", n) | Just n <- [name]] <>
+               [("arguments", a) | Just a <- [args]]
+        convertToolCall v = v
+
+    -- Convert Anthropic format to OpenTelemetry gen_ai.output.messages format
+    convertAnthropicToGenAI :: KM.KeyMap Value -> [Value]
+    convertAnthropicToGenAI obj =
+      let role = KM.lookup "role" obj
+          content = KM.lookup "content" obj
+          parts = case content of
+            Just (Aeson.Array items) -> map convertAnthropicPart (toList items)
+            _ -> []
+      in [object $ [("role", r) | Just r <- [role]] <> [("parts", Aeson.toJSON parts)]]
+      where
+        convertAnthropicPart (Aeson.Object item) =
+          case KM.lookup "type" item of
+            Just (Aeson.String "text") ->
+              object [("type", Aeson.String "text"), ("content", fromMaybe (Aeson.String "") $ KM.lookup "text" item)]
+            Just (Aeson.String "tool_use") ->
+              object $
+                [("type", Aeson.String "tool_call")] <>
+                [("id", i) | Just i <- [KM.lookup "id" item]] <>
+                [("name", n) | Just n <- [KM.lookup "name" item]] <>
+                [("arguments", inp) | Just inp <- [KM.lookup "input" item]]
+            _ -> Aeson.Object KM.empty
+        convertAnthropicPart v = v
+
+    -- Extract OpenInference attributes from OpenAI choice
+    extractFromChoice :: (Int, Value) -> [(Text, Value)]
+    extractFromChoice (idx, Aeson.Object choice) =
+      case KM.lookup "message" choice of
+        Just (Aeson.Object msg) -> extractFromMessage idx msg
+        _ -> []
+    extractFromChoice _ = []
+
+    -- Extract message attributes (role, content, tool_calls)
+    extractFromMessage :: Int -> KM.KeyMap Value -> [(Text, Value)]
+    extractFromMessage msgIdx msg =
+      let prefix = "llm.output_messages." <> T.pack (show msgIdx) <> ".message"
+          roleAttr = maybe [] (\r -> [(prefix <> ".role", r)]) $ KM.lookup "role" msg
+          contentAttr = maybe [] (\c -> [(prefix <> ".content", c)]) $ KM.lookup "content" msg
+          toolCallsAttr = case KM.lookup "tool_calls" msg of
+            Just (Aeson.Array tcs) -> concatMap (extractToolCall prefix) (zip [0::Int ..] (toList tcs))
+            _ -> []
+      in roleAttr <> contentAttr <> toolCallsAttr
+
+    -- Extract tool call attributes
+    extractToolCall :: Text -> (Int, Value) -> [(Text, Value)]
+    extractToolCall prefix (tcIdx, Aeson.Object tc) =
+      let tcPrefix = prefix <> ".tool_calls." <> T.pack (show tcIdx) <> ".tool_call"
+          idAttr = maybe [] (\i -> [(tcPrefix <> ".id", i)]) $ KM.lookup "id" tc
+          funcAttrs = case KM.lookup "function" tc of
+            Just (Aeson.Object func) ->
+              let nameAttr = maybe [] (\n -> [(tcPrefix <> ".function.name", n)]) $ KM.lookup "name" func
+                  argsAttr = maybe [] (\a -> [(tcPrefix <> ".function.arguments", a)]) $ KM.lookup "arguments" func
+              in nameAttr <> argsAttr
+            _ -> []
+      in idAttr <> funcAttrs
+    extractToolCall _ _ = []
+
+    -- Extract from Anthropic message format
+    extractFromAnthropicMessage :: KM.KeyMap Value -> [(Text, Value)]
+    extractFromAnthropicMessage obj =
+      let prefix = "llm.output_messages.0.message"
+          roleAttr = maybe [] (\r -> [(prefix <> ".role", r)]) $ KM.lookup "role" obj
+          contentAttrs = case KM.lookup "content" obj of
+            Just (Aeson.Array items) -> concatMap (extractAnthropicContent prefix) (zip [0::Int ..] (toList items))
+            _ -> []
+      in roleAttr <> contentAttrs
+
+    -- Extract content items from Anthropic format (text or tool_use)
+    extractAnthropicContent :: Text -> (Int, Value) -> [(Text, Value)]
+    extractAnthropicContent prefix (idx, Aeson.Object item) =
+      case KM.lookup "type" item of
+        Just (Aeson.String "text") ->
+          maybe [] (\t -> [(prefix <> ".content", t)]) $ KM.lookup "text" item
+        Just (Aeson.String "tool_use") ->
+          let tcPrefix = prefix <> ".tool_calls." <> T.pack (show idx) <> ".tool_call"
+              idAttr = maybe [] (\i -> [(tcPrefix <> ".id", i)]) $ KM.lookup "id" item
+              nameAttr = maybe [] (\n -> [(tcPrefix <> ".function.name", n)]) $ KM.lookup "name" item
+              inputAttr = maybe [] (\inp -> [(tcPrefix <> ".function.arguments", Aeson.String $ TE.decodeUtf8 $ BSL.toStrict $ Aeson.encode inp)]) $ KM.lookup "input" item
+          in idAttr <> nameAttr <> inputAttr
+        _ -> []
+    extractAnthropicContent _ _ = []
 
 -- ============================================================================
 -- Main Interceptor

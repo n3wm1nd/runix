@@ -44,6 +44,7 @@ import Runix.StreamChunk (StreamChunk, ignoreChunks)
 import Runix.Streaming (interpretStreamingStateful)
 import qualified OpenAIStreamingSpec
 import qualified SSEParserSpec
+import qualified SSEToJSONSpec
 import qualified FileSystemSecuritySpec
 import qualified FileSystemSecurityProperties
 import qualified FileSystemProjectSpec
@@ -183,6 +184,8 @@ main = do
     describe "Grep Security" GrepSecuritySpec.spec
 
     describe "SSE Parser Unit Tests" SSEParserSpec.spec
+
+    describe "SSE to JSON Parsing" SSEToJSONSpec.spec
 
     describe "HTTP Streaming Interceptors" HTTPStreamingInterceptorSpec.spec
 
