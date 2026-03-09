@@ -23,7 +23,7 @@
 --   whenJust langfuse $ \lf -> withLangFuse lf $ do
 --     -- Your LLM code here, traces are automatically captured
 --
-module Runix.LangFuse
+module Runix.Tracing.LangFuse
   ( -- * LangFuse OTLP Configuration
     LangFuse(..)
   , langFuseFromEnv
