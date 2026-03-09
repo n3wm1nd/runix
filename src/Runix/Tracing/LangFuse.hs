@@ -517,8 +517,9 @@ outputAttributes = \case
             Just (Aeson.Object msg) ->
               let role = KM.lookup "role" msg
                   content = KM.lookup "content" msg
+                  reasoningContent = KM.lookup "reasoning_content" msg
                   toolCalls = KM.lookup "tool_calls" msg
-                  parts = convertParts content toolCalls
+                  parts = convertParts content reasoningContent toolCalls
                   finishReason = KM.lookup "finish_reason" choice
                   baseMsg = object $ [("role", r) | Just r <- [role]] <> [("parts", Aeson.toJSON parts)]
                   withFinish = case finishReason of
@@ -528,16 +529,20 @@ outputAttributes = \case
             _ -> Aeson.Object KM.empty
         convertChoice _ = Aeson.Object KM.empty
 
-        convertParts :: Maybe Value -> Maybe Value -> [Value]
-        convertParts content toolCalls =
-          let textParts = case content of
+        convertParts :: Maybe Value -> Maybe Value -> Maybe Value -> [Value]
+        convertParts content reasoningContent toolCalls =
+          let reasoningParts = case reasoningContent of
+                Just (Aeson.String txt) | not (T.null txt) ->
+                  [object [("type", Aeson.String "reasoning"), ("content", Aeson.String txt)]]
+                _ -> []
+              textParts = case content of
                 Just (Aeson.String txt) | not (T.null txt) ->
                   [object [("type", Aeson.String "text"), ("content", Aeson.String txt)]]
                 _ -> []
               toolParts = case toolCalls of
                 Just (Aeson.Array tcs) -> map convertToolCall (toList tcs)
                 _ -> []
-          in textParts <> toolParts
+          in reasoningParts <> textParts <> toolParts
 
         convertToolCall :: Value -> Value
         convertToolCall (Aeson.Object tc) =
