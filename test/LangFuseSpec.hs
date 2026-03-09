@@ -23,7 +23,7 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import Data.Time (UTCTime)
 
-import Runix.LangFuse
+import Runix.Tracing.LangFuse
 import Runix.HTTP (HTTP(..), HTTPRequest(..), HTTPResponse(..), httpIO_)
 import Runix.RestAPI (RestAPI(..), Endpoint(..), RestEndpoint(..), restapiHTTP)
 import qualified Runix.RestAPI as RestAPI

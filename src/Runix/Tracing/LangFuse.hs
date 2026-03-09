@@ -29,6 +29,7 @@ module Runix.Tracing.LangFuse
   , langFuseFromEnv
     -- * Interceptors
   , withLangFuse
+  , withLangFuseStreaming
     -- * Types
   , Span(..)
   , SpanKind(..)
@@ -45,8 +46,9 @@ module Runix.Tracing.LangFuse
   ) where
 
 import Polysemy
-import Polysemy.State (State, get, put)
-import Data.Aeson (Value, ToJSON(..), object, (.=), eitherDecode)
+import Polysemy.State (State, get, modify, evalState)
+import qualified Data.Map.Strict as Map
+import Data.Aeson (Value, ToJSON(..), object, (.=), eitherDecode, decode)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import Data.Text (Text)
@@ -57,13 +59,20 @@ import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Base64 as B64
 import Data.String (IsString, fromString)
+import Data.Foldable (toList)
 import System.Environment (lookupEnv)
 
-import Runix.HTTP (HTTP(..), HTTPRequest(..), HTTPResponse(..))
+import Runix.HTTP (HTTP(..), HTTPRequest(..), HTTPResponse(..), HTTPStreaming, HTTPStreamResult(..))
 import Runix.RestAPI (RestAPI, RestEndpoint(..), Endpoint(..))
 import qualified Runix.RestAPI as RestAPI
 import Runix.Logging (Logging, info)
 import Runix.Time (Time, getCurrentTime)
+import Runix.Streaming (StreamId(..))
+import qualified Runix.Streaming as Streaming
+import Runix.Streaming.SSE (parseSSEChunks, SSEParseResult(..), SSEEvent(..))
+import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice)
+import Autodocodec (toJSONViaCodec)
 
 -- ============================================================================
 -- LangFuse OTLP Service
@@ -345,11 +354,6 @@ statusMessageFromResult = \case
              | otherwise -> Nothing
   Left err -> Just $ T.pack err
 
--- | Build all span attributes
-buildAttributes :: HTTPRequest -> Either String HTTPResponse -> [(Text, Value)]
-buildAttributes req result =
-  baseAttributes req <> resultAttributes result <> inputAttributes req <> outputAttributes result
-
 -- | Build all span attributes with session ID
 buildAttributesWithSession :: TraceId -> HTTPRequest -> Either String HTTPResponse -> [(Text, Value)]
 buildAttributesWithSession sessionId req result =
@@ -391,6 +395,66 @@ inputAttributes req = maybe [] parseRequestBody req.body
 
     bytesToText = TE.decodeUtf8 . BSL.toStrict
 
+-- | Extract just the text content from an Anthropic content array
+extractAnthropicContent :: Value -> Maybe Text
+extractAnthropicContent (Aeson.Array arr) =
+  let textParts = [txt | Aeson.Object item <- toList arr
+                       , Just (Aeson.String txt) <- [KM.lookup "text" item]]
+  in if null textParts then Nothing else Just (T.concat textParts)
+extractAnthropicContent _ = Nothing
+
+-- | Extract just the text content from OpenAI choices array
+extractOpenAIContent :: Value -> Maybe Text
+extractOpenAIContent (Aeson.Array arr) =
+  let textParts = [txt | Aeson.Object choice <- toList arr
+                       , Just (Aeson.Object msg) <- [KM.lookup "message" choice]
+                       , Just (Aeson.String txt) <- [KM.lookup "content" msg]]
+  in if null textParts then Nothing else Just (T.concat textParts)
+extractOpenAIContent _ = Nothing
+
+-- | Parse SSE streaming body and merge all JSON deltas, extracting just the content text
+-- Tries Anthropic protocol first, then OpenAI protocol, then falls back to Nothing
+parseSSEToJSON :: BSL.ByteString -> Maybe (Text, Maybe Value)
+parseSSEToJSON bodyBytes =
+  let SSEParseResult sseEvents _remainder = parseSSEChunks (BSL.toStrict bodyBytes)
+      -- Parse all SSE events as JSON values
+      jsonValues = [val | event <- sseEvents, Just val <- [decode (BSL.fromStrict (sseEventData event))]]
+  in case jsonValues of
+       [] -> Nothing
+       _ ->
+         -- Try Anthropic protocol
+         let anthropicInit = AnthropicSuccess $ AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
+             anthropicMerged = foldl mergeAnthropicDelta anthropicInit jsonValues
+             anthropicJSON = toJSONViaCodec anthropicMerged
+         in case anthropicJSON of
+              Aeson.Object obj ->
+                case (KM.lookup "content" obj >>= extractAnthropicContent, KM.lookup "usage" obj) of
+                  (Just content, usage) -> Just (content, usage)
+                  _ ->
+                    -- Try OpenAI protocol
+                    let openaiInit = OpenAISuccess $ defaultOpenAISuccessResponse
+                          { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
+                        openaiMerged = foldl mergeOpenAIDelta openaiInit jsonValues
+                        openaiJSON = toJSONViaCodec openaiMerged
+                    in case openaiJSON of
+                         Aeson.Object obj2 ->
+                           case (KM.lookup "choices" obj2 >>= extractOpenAIContent, KM.lookup "usage" obj2) of
+                             (Just content, usage) -> Just (content, usage)
+                             _ -> Nothing
+                         _ -> Nothing
+              _ ->
+                -- Try OpenAI protocol
+                let openaiInit = OpenAISuccess $ defaultOpenAISuccessResponse
+                      { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
+                    openaiMerged = foldl mergeOpenAIDelta openaiInit jsonValues
+                    openaiJSON = toJSONViaCodec openaiMerged
+                in case openaiJSON of
+                     Aeson.Object obj ->
+                       case (KM.lookup "choices" obj >>= extractOpenAIContent, KM.lookup "usage" obj) of
+                         (Just content, usage) -> Just (content, usage)
+                         _ -> Nothing
+                     _ -> Nothing
+
 -- | Parse response body for GenAI attributes
 outputAttributes :: Either String HTTPResponse -> [(Text, Value)]
 outputAttributes = \case
@@ -400,10 +464,34 @@ outputAttributes = \case
     parseResponseBody bodyBytes =
       case eitherDecode bodyBytes of
         Right (Aeson.Object obj) ->
-          let outputAttr = [("langfuse.observation.output", Aeson.String $ bytesToText bodyBytes)]
+          -- Direct JSON response (non-streaming)
+          -- Extract content text for better LangFuse rendering
+          let contentText = extractDirectContent bodyBytes obj
+              outputAttr = [("langfuse.observation.output", Aeson.String contentText)]
               usageAttr = maybe [] (\u -> [("gen_ai.usage", u)]) $ KM.lookup "usage" obj
           in outputAttr <> usageAttr
-        _ -> []
+        _ ->
+          -- Not direct JSON - try parsing as SSE
+          case parseSSEToJSON bodyBytes of
+            Just (contentText, maybeUsage) ->
+              -- Successfully merged SSE deltas and extracted content
+              let outputAttr = [("langfuse.observation.output", Aeson.String contentText)]
+                  usageAttr = maybe [] (\u -> [("gen_ai.usage", u)]) maybeUsage
+              in outputAttr <> usageAttr
+            Nothing ->
+              -- Couldn't parse as SSE/JSON - include raw body
+              [("langfuse.observation.output", Aeson.String $ bytesToText bodyBytes)]
+
+    -- Extract content from direct (non-streaming) JSON response
+    extractDirectContent bodyBytes obj =
+      -- Try Anthropic format first
+      case KM.lookup "content" obj >>= extractAnthropicContent of
+        Just txt -> txt
+        Nothing ->
+          -- Try OpenAI format
+          case KM.lookup "choices" obj >>= extractOpenAIContent of
+            Just txt -> txt
+            Nothing -> bytesToText bodyBytes  -- Fallback to raw JSON
 
     bytesToText = TE.decodeUtf8 . BSL.toStrict
 
@@ -434,6 +522,18 @@ withLangFuse _langfuse action = do
       HttpRequest req | isLLMRequest req -> traceRequest session req
                       | otherwise -> send $ HttpRequest req
 
+-- | Export a span to LangFuse
+exportSpan :: Members '[RestAPI LangFuse, Logging] r
+           => TraceId  -- ^ Session ID
+           -> SpanId
+           -> Span
+           -> Sem r ()
+exportSpan sessionId spanId span = do
+  let exportReq = mkExportRequest span
+  info $ fromString $ "LangFuse: Exporting span " <> T.unpack (unSpanId spanId) <> " for session " <> T.unpack (unTraceId sessionId)
+  (_ :: Value) <- RestAPI.post @LangFuse (Endpoint "v1/traces") exportReq
+  info $ fromString $ "LangFuse: Exported span " <> T.unpack (unSpanId spanId)
+
 -- | Trace a single LLM request within a session
 traceRequest :: Members '[HTTP, RestAPI LangFuse, Time, Logging] r
              => LangFuseSession
@@ -452,11 +552,74 @@ traceRequest session req = do
   -- Build and export span with session ID attribute
   let sessionId = sessionTraceId session
       span = buildSpanWithSession sessionId traceId spanId req startTime endTime result
-      exportReq = mkExportRequest span
 
-  -- Log and export (best-effort)
-  info $ fromString $ "LangFuse: Exporting span " <> T.unpack (unSpanId spanId) <> " for session " <> T.unpack (unTraceId sessionId)
-  (_ :: Value) <- RestAPI.post @LangFuse (Endpoint "v1/traces") exportReq
-  info $ fromString $ "LangFuse: Exported span " <> T.unpack (unSpanId spanId)
-
+  exportSpan sessionId spanId span
   pure result
+
+-- ============================================================================
+-- Streaming Interceptor
+-- ============================================================================
+
+-- | State for tracking streaming requests by StreamId
+type StreamRequestMap = Map.Map StreamId (UTCTime, HTTPRequest)
+
+-- | Intercept HTTPStreaming requests to trace LLM calls
+-- Similar to withLangFuse but for streaming requests
+withLangFuseStreaming :: forall r a. Members '[HTTPStreaming, RestAPI LangFuse, Time, Logging] r
+                      => LangFuse
+                      -> Sem r a
+                      -> Sem r a
+withLangFuseStreaming _langfuse action = do
+  -- Generate a session trace ID for this entire session
+  sessionTrace <- generateTraceId
+  let session = LangFuseSession sessionTrace
+
+  let handleStreaming :: forall x rInitial. HTTPStreaming (Sem rInitial) x
+                      -> Sem (Polysemy.State.State StreamRequestMap : r) x
+      handleStreaming = \case
+        Streaming.StartStream req -> do
+          timestamp <- getCurrentTime
+          result <- send $ Streaming.StartStream req
+          -- Store request config for this stream if it's an LLM request
+          case result of
+            Right sid | isLLMRequest req -> Polysemy.State.modify @StreamRequestMap $ Map.insert sid (timestamp, req)
+            _ -> return ()
+          return result
+
+        Streaming.FetchItem sid -> send $ Streaming.FetchItem sid
+
+        Streaming.CloseStream sid -> do
+          result <- send $ Streaming.CloseStream sid
+
+          -- Retrieve the request config for this stream
+          requestMap <- Polysemy.State.get @StreamRequestMap
+          case Map.lookup sid requestMap of
+            Just (startTime, req) -> do
+              endTime <- getCurrentTime
+
+              -- Build span from the streaming result
+              let sessionId = sessionTraceId session
+              traceId <- generateTraceId
+              spanId <- generateSpanId
+
+              let httpResp = HTTPResponse
+                    { code = streamStatusCode result
+                    , headers = streamHeaders result
+                    , body = streamBody result
+                    }
+                  span = buildSpanWithSession sessionId traceId spanId req startTime endTime (Right httpResp)
+
+              -- Debug: log body size
+              info $ fromString $ "LangFuse: Streaming response body size: " <> show (BSL.length (streamBody result)) <> " bytes"
+
+              -- Export using the common function
+              exportSpan sessionId spanId span
+
+              -- Clean up the map
+              Polysemy.State.modify @StreamRequestMap $ Map.delete sid
+
+            Nothing -> return ()
+
+          return result
+
+  Polysemy.State.evalState (Map.empty :: StreamRequestMap) . intercept @HTTPStreaming handleStreaming . raise $ action
