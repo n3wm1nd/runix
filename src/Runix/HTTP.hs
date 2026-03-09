@@ -293,6 +293,37 @@ withFullHTTPLogging = intercept $ \case
             Nothing -> info $ fromString "Body: (none)"
         send $ HttpRequest request
 
+-- | Interpret HTTP in terms of HTTPStreaming by consuming the entire stream
+-- This allows HTTP-level interceptors (like tracing) to work with streaming requests
+-- The interceptor sees the complete request/response after the stream is consumed
+interpretHTTPViaStreaming :: forall r a. Members '[HTTPStreaming, Fail] r
+                          => Sem (HTTP : r) a
+                          -> Sem r a
+interpretHTTPViaStreaming = interpret @HTTP $ \(HttpRequest req) -> do
+    -- Start stream using HTTPStreaming
+    streamResult <- send $ StartStream req
+    case streamResult of
+        Left err -> return $ Left err
+        Right streamId -> do
+            -- Consume the entire stream
+            let consumeStream = do
+                  chunk <- send $ FetchItem streamId
+                  case chunk of
+                    Nothing -> return ()
+                    Just _ -> consumeStream
+            consumeStream
+
+            -- Close stream to get the final result
+            httpStreamResult <- send $ CloseStream streamId
+
+            -- Convert to HTTPResponse and return
+            let httpResp = HTTPResponse
+                  { code = streamStatusCode httpStreamResult
+                  , headers = streamHeaders httpStreamResult
+                  , body = streamBody httpStreamResult
+                  }
+            return $ Right httpResp
+
 -- Example usage of withHeaders for setting authentication tokens:
 --
 -- authenticatedRequest :: Members [HTTP, RestAPI] r => Sem (HTTP : RestAPI : r) a -> Sem (HTTP : RestAPI : r) a
