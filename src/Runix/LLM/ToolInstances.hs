@@ -31,5 +31,5 @@ instance ToolParameter a => Callable (Sem r a) (Sem r) () a where
 -- | Tool instance for 0-arity Sem actions
 -- This extracts the tool name and description from the result type's ToolFunction instance
 instance ToolFunction a => Tool (Sem r a) (Sem r) () a where
-  toolName _ = toolFunctionName (Proxy @a)
-  toolDescription _ = toolFunctionDescription (Proxy @a)
+  toolName _ = toolFunctionName @a
+  toolDescription _ = toolFunctionDescription @a
