@@ -60,7 +60,6 @@ import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Default (Default, def)
-
 import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..), oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
@@ -73,12 +72,12 @@ import Runix.Streaming (interpretStreamingStateful)
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
 import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString as BS
-import Data.Aeson (decode)
 import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming, AnthropicDelta, AnthropicStreamingContent(..), parseAnthropicDelta, applyAnthropicDelta, extractAnthropicStreamingContent)
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming, OpenAIDelta, OpenAIStreamingContent(..), parseOpenAIDelta, applyOpenAIDelta, extractOpenAIStreamingContent)
+import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming, OpenAIStreamingContent(..), extractOpenAIStreamingContent)
+import qualified UniversalLLM.Protocols.OpenAI.Delta as OAIDelta
+import UniversalLLM.Protocols.OpenAI.Delta (Delta(..))
 
 -- ============================================================================
 -- Protocol Typeclass
@@ -88,8 +87,8 @@ import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(
 data StreamingContent = StreamingText Text | StreamingReasoning Text
   deriving (Show, Eq)
 
--- | Typeclass for provider protocols (Anthropic vs OpenAI-compatible)
--- Abstracts over the protocol-specific details like endpoint path and streaming handling
+-- | Typeclass for provider protocols (Anthropic vs OpenAI-compatible).
+-- Abstracts over the protocol-specific details like endpoint path and streaming handling.
 class ProviderProtocol response where
   type ProtocolRequest response
   type ProtocolDelta response
@@ -99,9 +98,9 @@ class ProviderProtocol response where
   emptyStreamingResponse :: response
   -- | Parse a delta from SSE event data (ByteString)
   parseDelta :: BS.ByteString -> Maybe (ProtocolDelta response)
-  -- | Apply a delta to the accumulated response (simplified, for typed deltas)
+  -- | Apply a delta to the accumulated response
   applyDelta :: response -> ProtocolDelta response -> response
-  -- | Extract streaming content from a delta for display
+  -- | Extract streaming content from a delta for real-time display
   extractStreamingContent :: ProtocolDelta response -> [StreamingContent]
   -- | Full Value-based delta merge (for complete accumulation including tool calls)
   mergeStreamingDelta :: response -> Value -> response
@@ -123,19 +122,19 @@ instance ProviderProtocol AnthropicResponse where
 
 instance ProviderProtocol OpenAIResponse where
   type ProtocolRequest OpenAIResponse = OpenAIRequest
-  type ProtocolDelta OpenAIResponse = OpenAIDelta
+  type ProtocolDelta OpenAIResponse = Delta
   protocolEndpoint = Endpoint "chat/completions"
   emptyStreamingResponse = OpenAISuccess $
     defaultOpenAISuccessResponse
       { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
-  parseDelta = parseOpenAIDelta
-  applyDelta = applyOpenAIDelta
+  parseDelta = OAIDelta.parseDelta
+  applyDelta acc delta = mergeOpenAIDelta acc (deltaValue delta)
   extractStreamingContent delta =
       [case c of
          OpenAIStreamingText t -> StreamingText t
          OpenAIStreamingReasoning t -> StreamingReasoning t
       | c <- extractOpenAIStreamingContent delta]
-  mergeStreamingDelta = mergeOpenAIDelta
+  mergeStreamingDelta acc chunk = mergeOpenAIDelta acc chunk
 
 -- ============================================================================
 -- Streaming Enabler Typeclass
@@ -319,20 +318,15 @@ interpretLLMStream api composableProvider model defaultConfigs action =
                         let input = streamSSERemainder streamState <> chunk
                             SSEParseResult sseEvents remainder = parseSSEChunks input
 
-                        -- Parse event data as JSON Values for accumulation
-                        let jsonValues = [val | event <- sseEvents
-                                              , Just val <- [decode (BSL.fromStrict (sseEventData event))]]
+                        -- Parse each SSE event's data as a delta (single pass)
+                        let deltas = [d | event <- sseEvents
+                                        , Just d <- [parseDelta @(ProviderResponse model) (sseEventData event)]]
 
-                        -- Merge JSON deltas into accumulated response using full Value-based merge
-                        -- (This handles all delta types including tool calls, not just text/reasoning)
-                        let accumulated' = foldl (mergeStreamingDelta @(ProviderResponse model))
+                        -- Accumulate and extract display content in one pass over deltas
+                        let accumulated' = foldl (applyDelta @(ProviderResponse model))
                                                  (streamAccumulatedResponse streamState)
-                                                 jsonValues
-
-                        -- Parse typed deltas for extracting streaming content display
-                        let typedDeltas = [delta | event <- sseEvents
-                                                 , Just delta <- [parseDelta @(ProviderResponse model) (sseEventData event)]]
-                            contents = concatMap (extractStreamingContent @(ProviderResponse model)) typedDeltas
+                                                 deltas
+                            contents = concatMap (extractStreamingContent @(ProviderResponse model)) deltas
                             events = map contentToEvent contents
 
                         case events of
