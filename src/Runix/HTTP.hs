@@ -16,6 +16,7 @@ module Runix.HTTP where
 import Prelude
 import Polysemy
 import Polysemy.Fail
+import Runix.Cancellation (Cancellation, cancelNoop, isCanceled)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString as BS
@@ -128,10 +129,17 @@ data HTTPStreamState = HTTPStreamState
     , hssHeaders :: [(String, String)]
     }
 
--- | HTTP streaming interpreter with connection management via STM
--- Uses interpretStreamingStateful helper to manage stream state
-httpIOStreaming :: forall r a. (HasCallStack, Members '[Embed IO, Fail] r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
-httpIOStreaming requestTransform =
+-- | HTTP streaming interpreter that checks for cancellation between chunks.
+--
+-- On each FetchItem, if the Cancellation flag is set, returns Nothing (end of
+-- stream) immediately rather than waiting for the next chunk. This causes the
+-- upstream consumer to stop fetching and close the stream with whatever it has
+-- accumulated so far. Cancellation is NOT an error — partial results are valid.
+--
+-- Use this in interactive contexts (TUI) where the user may press ESC.
+-- For non-interactive contexts use 'httpIOStreaming' which bundles cancelNoop.
+httpIOStreamingWithCancellation :: forall r a. (HasCallStack, Members '[Embed IO, Fail, Cancellation] r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreamingWithCancellation requestTransform =
     interpretStreamingStateful onStart onFetch onClose
   where
     -- Initialize: Create TQueue, fork HTTP request thread, wait for header
@@ -181,19 +189,25 @@ httpIOStreaming requestTransform =
             -- Should not happen, but handle gracefully
             _ -> return $ Left "Unexpected stream message before header"
 
-    -- Fetch: Read from TQueue, yield StreamChunk, end on StreamEnd
+    -- Fetch: Check cancellation first, then read from TQueue
+    -- If cancelled, return Nothing (graceful end) without touching the queue.
+    -- The forked HTTP thread continues in the background and will be GC'd.
     onFetch st = do
-        msg <- embed $ atomically $ readTQueue (hssQueue st)
-        case msg of
-            StreamChunk chunk -> return (Just chunk, st)
-            StreamEnd _ -> do
-                -- Put it back so onClose can retrieve the accumulated body
-                embed $ atomically $ unGetTQueue (hssQueue st) msg
-                return (Nothing, st)
-            StreamError _ -> do
-                embed $ atomically $ unGetTQueue (hssQueue st) msg
-                return (Nothing, st)
-            StreamHeader _ _ -> onFetch st  -- should not happen after start
+        canceled <- isCanceled
+        if canceled
+            then return (Nothing, st)
+            else do
+                msg <- embed $ atomically $ readTQueue (hssQueue st)
+                case msg of
+                    StreamChunk chunk -> return (Just chunk, st)
+                    StreamEnd _ -> do
+                        -- Put it back so onClose can retrieve the accumulated body
+                        embed $ atomically $ unGetTQueue (hssQueue st) msg
+                        return (Nothing, st)
+                    StreamError _ -> do
+                        embed $ atomically $ unGetTQueue (hssQueue st) msg
+                        return (Nothing, st)
+                    StreamHeader _ _ -> onFetch st  -- should not happen after start
 
     -- Close: Build HTTPStreamResult from state + remaining queue messages
     -- Check for errors in the remaining messages and construct appropriate result
@@ -221,6 +235,15 @@ httpIOStreaming requestTransform =
 -- | Convenience function - httpIO with no request transformation
 httpIO_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTP : r) a -> Sem r a
 httpIO_ = httpIO id
+
+-- | HTTP streaming interpreter (non-interactive, no cancellation support).
+--
+-- Equivalent to @cancelNoop . httpIOStreamingWithCancellation@.
+-- Use in non-interactive contexts (tests, batch processing) where there is no
+-- cancellation signal. For TUI/interactive use, wire 'httpIOStreamingWithCancellation'
+-- directly with a real 'Cancellation' interpreter.
+httpIOStreaming :: forall r a. (HasCallStack, Members '[Embed IO, Fail] r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
+httpIOStreaming requestTransform = cancelNoop . httpIOStreamingWithCancellation requestTransform . raiseUnder
 
 -- | Convenience function - httpIOStreaming with no request transformation
 httpIOStreaming_ :: HasCallStack => Members [Fail, Logging, Embed IO] r => Sem (HTTPStreaming : r) a -> Sem r a
