@@ -56,6 +56,7 @@ import Polysemy.Fail
 import Polysemy.State (State, evalState, get, put)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson (Value, encode)
+import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -74,7 +75,7 @@ import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString as BS
-import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming, AnthropicDelta, AnthropicStreamingContent(..), parseAnthropicDelta, applyAnthropicDelta, extractAnthropicStreamingContent)
+import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming, AnthropicStreamingContent(..), extractAnthropicStreamingContentFromValue)
 import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming, OpenAIStreamingContent(..), extractOpenAIStreamingContent)
 import qualified UniversalLLM.Protocols.OpenAI.Delta as OAIDelta
 import UniversalLLM.Protocols.OpenAI.Delta (Delta(..))
@@ -107,17 +108,17 @@ class ProviderProtocol response where
 
 instance ProviderProtocol AnthropicResponse where
   type ProtocolRequest AnthropicResponse = AnthropicRequest
-  type ProtocolDelta AnthropicResponse = AnthropicDelta
+  type ProtocolDelta AnthropicResponse = Value
   protocolEndpoint = Endpoint "messages"
   emptyStreamingResponse = AnthropicSuccess $
     AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
-  parseDelta = parseAnthropicDelta
-  applyDelta = applyAnthropicDelta
-  extractStreamingContent delta =
+  parseDelta = Aeson.decodeStrict
+  applyDelta acc chunk = mergeAnthropicDelta acc chunk
+  extractStreamingContent chunk =
       [case c of
          AnthropicStreamingText t -> StreamingText t
          AnthropicStreamingReasoning t -> StreamingReasoning t
-      | c <- extractAnthropicStreamingContent delta]
+      | c <- extractAnthropicStreamingContentFromValue chunk]
   mergeStreamingDelta = mergeAnthropicDelta
 
 instance ProviderProtocol OpenAIResponse where
