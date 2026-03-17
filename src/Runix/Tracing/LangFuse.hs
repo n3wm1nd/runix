@@ -432,8 +432,7 @@ parseSSEToJSON bodyBytes =
            Aeson.Object km
              | KM.member "choices" km ->
                  -- OpenAI protocol
-                 let openaiInit = OpenAISuccess $ defaultOpenAISuccessResponse
-                       { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
+                 let openaiInit = OpenAISuccess defaultOpenAISuccessResponse
                      openaiMerged = foldl mergeOpenAIDelta openaiInit jsonValues
                      -- Extract usage from chunks (it's at root level, not in delta)
                      maybeUsage = listToMaybe [u | Aeson.Object obj <- jsonValues, Just u <- [KM.lookup "usage" obj]]

@@ -319,10 +319,6 @@ spec = describe "LangFuse OpenTelemetry Integration" $ do
       let payload = capturedPayload $ head otlpTraces
           payloadStr = show payload
 
-      -- Debug: print the payload
-      putStrLn "\n=== OTLP Payload for Tool Calls ==="
-      putStrLn payloadStr
-
       -- Should contain OpenInference attributes for tool calls
       payloadStr `shouldContain` "llm.output_messages.0.message.role"
       payloadStr `shouldContain` "llm.output_messages.0.message.tool_calls.0.tool_call.function.name"
