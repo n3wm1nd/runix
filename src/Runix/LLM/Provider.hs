@@ -5,6 +5,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Runix.LLM.Provider
   ( -- * Generic helpers
@@ -49,6 +51,10 @@ module Runix.LLM.Provider
   , anthropicOAuthRestAPI
   , anthropicOAuthLLMWith
   , anthropicOAuthLLMInterpreter
+    -- * Model selection
+  , SomeLLMInterpreter(..)
+  , candidate
+  , firstAvailableLLM
   ) where
 
 import Data.Text (Text)
@@ -300,3 +306,49 @@ anthropicOAuthLLMInterpreter :: forall model s r a.
                              -> Sem r (Maybe (Sem (LLM model : r) a -> Sem r a))
 anthropicOAuthLLMInterpreter provider model configs =
     withLLMInterpreter (fromEnv AnthropicOAuthAuth "ANTHROPIC_OAUTH_TOKEN") (\auth -> anthropicOAuthLLMWith auth provider model configs)
+
+-- ============================================================================
+-- Model Selection
+-- ============================================================================
+
+-- | An LLM interpreter for some model we've committed to but no longer name.
+-- The model type is erased — the interpreter is the only thing that remains.
+data SomeLLMInterpreter r a where
+  SomeLLMInterpreter :: (Sem (LLM model : r) a -> Sem r a) -> SomeLLMInterpreter r a
+
+-- | Wrap a provider's interpreter probe into a selection candidate.
+candidate :: Sem r (Maybe (Sem (LLM model : r) a -> Sem r a))
+          -> Sem r (Maybe (SomeLLMInterpreter r a))
+candidate = fmap (fmap SomeLLMInterpreter)
+
+-- | Try each candidate in order, return the first available interpreter.
+-- Each candidate is a probe that returns Just an interpreter if auth is available.
+firstAvailableLLM :: [Sem r (Maybe (SomeLLMInterpreter r a))] -> Sem r (Maybe (SomeLLMInterpreter r a))
+firstAvailableLLM [] = return Nothing
+firstAvailableLLM (probe:rest) = probe >>= \case
+  Just interp -> return (Just interp)
+  Nothing     -> firstAvailableLLM rest
+
+-- $example
+--
+-- Example usage — pick the first available model from a priority list,
+-- then run an action against it:
+--
+-- @
+-- runWithFirstAvailable
+--   :: Members '[HTTP, Fail, Embed IO] r
+--   => Sem r Text
+-- runWithFirstAvailable = do
+--   mInterp <- firstAvailableLLM
+--     [ candidate $ zaiLLMInterpreter          route glm47   []
+--     , candidate $ anthropicOAuthLLMInterpreter route sonnet []
+--     , candidate $ llamaCppLLMInterpreter     route glm45air []
+--     ]
+--   case mInterp of
+--     Nothing                       -> fail "no model available"
+--     Just (SomeLLMInterpreter run) -> run $ askLLM "hello"
+-- @
+--
+-- 'candidate' wraps a provider probe so all entries share the same list type,
+-- erasing the concrete @model@. Pattern-matching on @SomeLLMInterpreter run@
+-- gives back the interpreter; the action passed to @run@ must work for any @model@.

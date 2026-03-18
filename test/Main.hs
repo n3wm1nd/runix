@@ -52,6 +52,7 @@ import qualified PathResolutionSpec
 import qualified ChrootTranslationSpec
 import qualified HTTPStreamingInterceptorSpec
 import qualified LangFuseSpec
+import qualified LLMProviderSpec
 
 -- ============================================================================
 -- Test Models
@@ -184,6 +185,8 @@ main = do
     describe "HTTP Streaming Interceptors" HTTPStreamingInterceptorSpec.spec
 
     LangFuseSpec.spec
+
+    LLMProviderSpec.spec
 
     describe "Runix OpenAI Streaming (Mocked HTTP)" OpenAIStreamingSpec.spec
 
