@@ -37,6 +37,8 @@ module Runix.LLM.Provider
   , openRouterRestAPI
   , anthropicAPIKeyRestAPI
   , anthropicOAuthRestAPI
+    -- * Constraint synonym
+  , LLMConstraints
     -- * auth -> interpreter builders
   , zaiLLMWith
   , llamaCppLLMWith

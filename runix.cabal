@@ -86,6 +86,7 @@ library
         Runix.LLM.Context,
         Runix.LLM.Interpreter,
         Runix.LLM.Provider,
+        Runix.LLM.Models,
         Runix.LLM.ToolInstances,
         Runix.LLM.ToolExecution,
         Runix.LLMTypes,
