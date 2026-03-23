@@ -72,8 +72,8 @@ import Runix.Config (Config, getConfig, runConfig)
 import Runix.RestAPI (RestEndpoint(..), restapiHTTP, RestAPI)
 import Runix.HTTP (HTTP)
 import Runix.LLM (LLM)
-import Runix.LLM.Interpreter (interpretLLM, ProviderProtocol)
-import UniversalLLM (ComposableProvider, ModelConfig, ModelName, ProviderRequest, ProviderResponse)
+import Runix.LLM.Interpreter (interpretLLM)
+import UniversalLLM (ComposableProvider, ModelConfig, ModelName, ProviderRequest, ProviderResponse, StreamingProtocol)
 import UniversalLLM.Providers.Anthropic (oauthHeaders)
 
 -- ============================================================================
@@ -187,7 +187,7 @@ anthropicOAuthRestAPI = withRestAPI ((\(AnthropicOAuthAuth token) -> AnthropicOA
 
 type LLMConstraints model s r =
   ( ModelName model, HasCodec (ProviderRequest model), HasCodec (ProviderResponse model)
-  , Monoid (ProviderRequest model), ProviderProtocol (ProviderResponse model)
+  , Monoid (ProviderRequest model), StreamingProtocol (ProviderResponse model)
   , Default s, Members '[HTTP, Fail] r
   )
 

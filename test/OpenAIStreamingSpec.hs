@@ -29,7 +29,7 @@ import qualified UniversalLLM.Providers.OpenAI as Provider
 import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
 import Autodocodec (HasCodec)
 
-import Runix.LLM.Interpreter (OpenAIAuth(..), ProviderProtocol, EnableStreaming, ProtocolRequest)
+import Runix.LLM.Interpreter (OpenAIAuth(..))
 import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
 import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))

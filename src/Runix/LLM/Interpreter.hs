@@ -26,11 +26,9 @@ module Runix.LLM.Interpreter
     -- ** Convenience (bundles restapiHTTP, for tests etc.)
   , interpretLLMWith
   , interpretLLMStreamingWith
-    -- * Protocol typeclass
-  , ProviderProtocol(..)
-  , EnableStreaming(..)
-  , ProtocolRequest
-  , StreamingContent(..)
+    -- * Protocol typeclasses (re-exported from UniversalLLM)
+    -- StreamingProtocol, EnableStreaming, ProtocolRequest, StreamingContent
+    -- are exported via 'module UniversalLLM' below
     -- * Cancellation wrapper
   , withLLMCancellation
     -- * Generic model wrappers
@@ -56,7 +54,6 @@ import Polysemy.Fail
 import Polysemy.State (State, evalState, get, put)
 import Autodocodec (HasCodec, toJSONViaCodec, parseJSONViaCodec)
 import Data.Aeson (Value, encode)
-import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -75,81 +72,7 @@ import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString as BS
-import UniversalLLM.Protocols.Anthropic (AnthropicResponse(..), AnthropicSuccessResponse(..), AnthropicUsage(..), mergeAnthropicDelta, AnthropicRequest, enableAnthropicStreaming, AnthropicStreamingContent(..), extractAnthropicStreamingContentFromValue)
-import UniversalLLM.Protocols.OpenAI (OpenAIResponse(..), OpenAISuccessResponse(..), OpenAIChoice(..), OpenAIMessage(..), mergeOpenAIDelta, defaultOpenAIMessage, defaultOpenAISuccessResponse, defaultOpenAIChoice, OpenAIRequest, enableOpenAIStreaming, OpenAIStreamingContent(..), extractOpenAIStreamingContent)
-import qualified UniversalLLM.Protocols.OpenAI.Delta as OAIDelta
-import UniversalLLM.Protocols.OpenAI.Delta (Delta(..))
 
--- ============================================================================
--- Protocol Typeclass
--- ============================================================================
-
--- | Streaming content that can be different types of chunks
-data StreamingContent = StreamingText Text | StreamingReasoning Text
-  deriving (Show, Eq)
-
--- | Typeclass for provider protocols (Anthropic vs OpenAI-compatible).
--- Abstracts over the protocol-specific details like endpoint path and streaming handling.
-class ProviderProtocol response where
-  type ProtocolRequest response
-  type ProtocolDelta response
-  -- | The endpoint path for this protocol
-  protocolEndpoint :: Endpoint
-  -- | Create an empty response for streaming accumulation
-  emptyStreamingResponse :: response
-  -- | Parse a delta from SSE event data (ByteString)
-  parseDelta :: BS.ByteString -> Maybe (ProtocolDelta response)
-  -- | Apply a delta to the accumulated response
-  applyDelta :: response -> ProtocolDelta response -> response
-  -- | Extract streaming content from a delta for real-time display
-  extractStreamingContent :: ProtocolDelta response -> [StreamingContent]
-  -- | Full Value-based delta merge (for complete accumulation including tool calls)
-  mergeStreamingDelta :: response -> Value -> response
-
-instance ProviderProtocol AnthropicResponse where
-  type ProtocolRequest AnthropicResponse = AnthropicRequest
-  type ProtocolDelta AnthropicResponse = Value
-  protocolEndpoint = Endpoint "messages"
-  emptyStreamingResponse = AnthropicSuccess $
-    AnthropicSuccessResponse "" "" "assistant" [] Nothing (AnthropicUsage 0 0)
-  parseDelta = Aeson.decodeStrict
-  applyDelta acc chunk = mergeAnthropicDelta acc chunk
-  extractStreamingContent chunk =
-      [case c of
-         AnthropicStreamingText t -> StreamingText t
-         AnthropicStreamingReasoning t -> StreamingReasoning t
-      | c <- extractAnthropicStreamingContentFromValue chunk]
-  mergeStreamingDelta = mergeAnthropicDelta
-
-instance ProviderProtocol OpenAIResponse where
-  type ProtocolRequest OpenAIResponse = OpenAIRequest
-  type ProtocolDelta OpenAIResponse = Delta
-  protocolEndpoint = Endpoint "chat/completions"
-  emptyStreamingResponse = OpenAISuccess $
-    defaultOpenAISuccessResponse
-      { choices = [defaultOpenAIChoice { message = defaultOpenAIMessage { role = "assistant" } }] }
-  parseDelta = OAIDelta.parseDelta
-  applyDelta acc delta = mergeOpenAIDelta acc (deltaValue delta)
-  extractStreamingContent delta =
-      [case c of
-         OpenAIStreamingText t -> StreamingText t
-         OpenAIStreamingReasoning t -> StreamingReasoning t
-      | c <- extractOpenAIStreamingContent delta]
-  mergeStreamingDelta acc chunk = mergeOpenAIDelta acc chunk
-
--- ============================================================================
--- Streaming Enabler Typeclass
--- ============================================================================
-
--- | Typeclass to enable streaming based on the response type
-class ProviderProtocol response => EnableStreaming response where
-  enableStreamingForProtocol :: ProtocolRequest response -> ProtocolRequest response
-
-instance EnableStreaming AnthropicResponse where
-  enableStreamingForProtocol = enableAnthropicStreaming
-
-instance EnableStreaming OpenAIResponse where
-  enableStreamingForProtocol = enableOpenAIStreaming
 
 -- ============================================================================
 -- Request Helper
@@ -157,13 +80,13 @@ instance EnableStreaming OpenAIResponse where
 
 -- | Send a non-streaming request to the provider
 sendRequest :: forall p response r.
-               ( ProviderProtocol response
+               ( StreamingProtocol response
                , HasCodec response
                , Member (RestAPI p) r
                )
             => Value -> Sem r (Either String response)
 sendRequest requestValue = do
-    responseValue <- post (protocolEndpoint @response) requestValue
+    responseValue <- post (Endpoint (T.unpack (endpointPath @response))) requestValue
     return $ parseEither parseJSONViaCodec responseValue
 
 -- ============================================================================
@@ -177,7 +100,7 @@ interpretLLMWithState :: forall p model s r a.
                          , HasCodec (ProviderRequest model)
                          , HasCodec (ProviderResponse model)
                          , Monoid (ProviderRequest model)
-                         , ProviderProtocol (ProviderResponse model)
+                         , StreamingProtocol (ProviderResponse model)
                          , Members '[RestAPI p, State (model, s)] r
                          )
                       => ComposableProvider model s
@@ -207,7 +130,7 @@ interpretLLM :: forall p model s r a.
                 , HasCodec (ProviderRequest model)
                 , HasCodec (ProviderResponse model)
                 , Monoid (ProviderRequest model)
-                , ProviderProtocol (ProviderResponse model)
+                , StreamingProtocol (ProviderResponse model)
                 , Default s
                 , Member (RestAPI p) r
                 )
@@ -278,7 +201,7 @@ interpretLLMStream api composableProvider model defaultConfigs action =
             requestValue = encode $ toJSONViaCodec streamingRequest
             httpReq = HTTPRequest
                 { method = "POST"
-                , uri = apiroot api <> "/" <> case protocolEndpoint @(ProviderResponse model) of Endpoint p -> p
+                , uri = apiroot api <> "/" <> T.unpack (endpointPath @(ProviderResponse model))
                 , headers = ("Content-Type", "application/json")
                           : ("User-Agent", useragent api)
                           : authheaders api
@@ -499,7 +422,7 @@ interpretLLMWith :: forall p model s r a.
                     , HasCodec (ProviderRequest model)
                     , HasCodec (ProviderResponse model)
                     , Monoid (ProviderRequest model)
-                    , ProviderProtocol (ProviderResponse model)
+                    , StreamingProtocol (ProviderResponse model)
                     , RestEndpoint p
                     , Default s
                     , Members '[HTTP, Fail] r

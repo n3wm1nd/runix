@@ -31,7 +31,7 @@ import UniversalLLM.Protocols.Anthropic (AnthropicResponse)
 import Autodocodec (HasCodec)
 import Data.Default (Default)
 
-import Runix.LLM.Interpreter (AnthropicOAuthAuth(..), ProviderProtocol, EnableStreaming, ProtocolRequest)
+import Runix.LLM.Interpreter (AnthropicOAuthAuth(..))
 import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
 import Runix.LLM (LLM, queryLLM)
 import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
