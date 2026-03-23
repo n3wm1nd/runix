@@ -27,7 +27,7 @@ module Runix.LLM.Interpreter
   , interpretLLMWith
   , interpretLLMStreamingWith
     -- * Protocol typeclasses (re-exported from UniversalLLM)
-    -- StreamingProtocol, EnableStreaming, ProtocolRequest, StreamingContent
+    -- StreamingProtocol, EnableStreaming, StreamingContent
     -- are exported via 'module UniversalLLM' below
     -- * Cancellation wrapper
   , withLLMCancellation
@@ -160,8 +160,7 @@ data LLMStreamState model s = LLMStreamState
 interpretLLMStream :: forall p model s r a.
                       ( ModelName model
                       , Provider model
-                      , EnableStreaming (ProviderResponse model)
-                      , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
+                      , EnableStreaming model
                       , HasStreaming model
                       , RestEndpoint p
                       , Default s
@@ -190,7 +189,7 @@ interpretLLMStream api composableProvider model defaultConfigs action =
         -- Build the provider request
         let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
             -- Enable streaming on the request
-            streamingRequest = enableStreamingForProtocol @(ProviderResponse model) request
+            streamingRequest = enableStreamingForProtocol @model request
             requestValue = encode $ toJSONViaCodec streamingRequest
             httpReq = HTTPRequest
                 { method = "POST"
@@ -433,8 +432,7 @@ interpretLLMWith api composableProvider model defaultConfigs action =
 interpretLLMStreamingWith :: forall p model s r a.
                              ( ModelName model
                              , Provider model
-                             , EnableStreaming (ProviderResponse model)
-                             , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
+                             , EnableStreaming model
                              , HasStreaming model
                              , RestEndpoint p
                              , Default s

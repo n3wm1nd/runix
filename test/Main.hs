@@ -129,7 +129,7 @@ mockHTTP sseBody =
 
 -- Reusable test runner that composes all effect interpreters for testing
 -- with mocked HTTP effect provider (generic over model type).
-testRunner :: forall model s a. (ModelName model, Default s, Provider model, EnableStreaming (ProviderResponse model), ProtocolRequest (ProviderResponse model) ~ ProviderRequest model, HasStreaming model, ProviderResponse model ~ AnthropicResponse)
+testRunner :: forall model s a. (ModelName model, Default s, Provider model, EnableStreaming model, HasStreaming model, ProviderResponse model ~ AnthropicResponse)
            => ComposableProvider model s
            -> model
            -> BSL.ByteString

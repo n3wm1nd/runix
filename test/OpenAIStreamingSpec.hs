@@ -121,8 +121,7 @@ testRunner :: forall model s a.
               ( ModelName model
               , Default s
               , Provider model
-              , EnableStreaming (ProviderResponse model)
-              , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
+              , EnableStreaming model
               , HasStreaming model
               , ProviderResponse model ~ OpenAIResponse
               )
