@@ -28,7 +28,6 @@ import UniversalLLM
 import UniversalLLM.Providers.Anthropic (Anthropic(..))
 import qualified UniversalLLM.Providers.Anthropic as Provider
 import UniversalLLM.Protocols.Anthropic (AnthropicResponse)
-import Autodocodec (HasCodec)
 import Data.Default (Default)
 
 import Runix.LLM.Interpreter (AnthropicOAuthAuth(..))
@@ -130,7 +129,7 @@ mockHTTP sseBody =
 
 -- Reusable test runner that composes all effect interpreters for testing
 -- with mocked HTTP effect provider (generic over model type).
-testRunner :: forall model s a. (ModelName model, Default s, HasCodec (ProviderRequest model), Monoid (ProviderRequest model), EnableStreaming (ProviderResponse model), ProtocolRequest (ProviderResponse model) ~ ProviderRequest model, HasStreaming model, ProviderResponse model ~ AnthropicResponse)
+testRunner :: forall model s a. (ModelName model, Default s, Provider model, EnableStreaming (ProviderResponse model), ProtocolRequest (ProviderResponse model) ~ ProviderRequest model, HasStreaming model, ProviderResponse model ~ AnthropicResponse)
            => ComposableProvider model s
            -> model
            -> BSL.ByteString

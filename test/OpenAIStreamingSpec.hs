@@ -27,7 +27,6 @@ import UniversalLLM
 import UniversalLLM.Providers.OpenAI (OpenAI(..))
 import qualified UniversalLLM.Providers.OpenAI as Provider
 import UniversalLLM.Protocols.OpenAI (OpenAIRequest, OpenAIResponse)
-import Autodocodec (HasCodec)
 
 import Runix.LLM.Interpreter (OpenAIAuth(..))
 import Runix.LLM.Interpreter (interpretLLMStreamingWith, queryStreamingLLM)
@@ -49,10 +48,6 @@ import UniversalLLM.Providers.XMLToolCalls (xmlResponseParser)
 -- GLM4.5 model supporting tools and reasoning (via OpenAI protocol)
 data GLM45 = GLM45 deriving stock (Show, Eq)
 
-instance Provider (Model GLM45 OpenAI) where
-  type ProviderRequest (Model GLM45 OpenAI) = OpenAIRequest
-  type ProviderResponse (Model GLM45 OpenAI) = OpenAIResponse
-
 instance ModelName (Model GLM45 OpenAI) where
   modelName (Model _ _) = "glm-4-plus"
 
@@ -71,10 +66,6 @@ glm45ComposableProvider = xmlResponseParser `chainProviders` withReasoning `chai
 
 -- GLM45 with tools but no reasoning (simplified version for text-only test)
 data GLM45TextOnly = GLM45TextOnly deriving stock (Show, Eq)
-
-instance Provider (Model GLM45TextOnly OpenAI) where
-  type ProviderRequest (Model GLM45TextOnly OpenAI) = OpenAIRequest
-  type ProviderResponse (Model GLM45TextOnly OpenAI) = OpenAIResponse
 
 instance ModelName (Model GLM45TextOnly OpenAI) where
   modelName (Model _ _) = "glm-4-plus"
@@ -129,8 +120,7 @@ mockHTTP sseBody =
 testRunner :: forall model s a.
               ( ModelName model
               , Default s
-              , HasCodec (ProviderRequest model)
-              , Monoid (ProviderRequest model)
+              , Provider model
               , EnableStreaming (ProviderResponse model)
               , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
               , HasStreaming model

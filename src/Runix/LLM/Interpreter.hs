@@ -80,13 +80,12 @@ import qualified Data.ByteString as BS
 
 -- | Send a non-streaming request to the provider
 sendRequest :: forall p response r.
-               ( StreamingProtocol response
-               , HasCodec response
+               ( HasCodec response
                , Member (RestAPI p) r
                )
-            => Value -> Sem r (Either String response)
-sendRequest requestValue = do
-    responseValue <- post (Endpoint (T.unpack (endpointPath @response))) requestValue
+            => Endpoint -> Value -> Sem r (Either String response)
+sendRequest endpoint requestValue = do
+    responseValue <- post endpoint requestValue
     return $ parseEither parseJSONViaCodec responseValue
 
 -- ============================================================================
@@ -97,10 +96,7 @@ sendRequest requestValue = do
 -- | Internal interpreter with explicit state - first-order, no streaming
 interpretLLMWithState :: forall p model s r a.
                          ( ModelName model
-                         , HasCodec (ProviderRequest model)
-                         , HasCodec (ProviderResponse model)
-                         , Monoid (ProviderRequest model)
-                         , StreamingProtocol (ProviderResponse model)
+                         , Provider model
                          , Members '[RestAPI p, State (model, s)] r
                          )
                       => ComposableProvider model s
@@ -113,8 +109,9 @@ interpretLLMWithState composableProvider defaultConfigs = interpret $ \case
         (m, stackState) <- get @(model, s)
         let (stackState', request) = toProviderRequest composableProvider m mergedConfigs stackState messages
         let requestValue = toJSONViaCodec request
+            endpoint = Endpoint (T.unpack (endpointPath @(ProviderRequest model)))
 
-        result <- sendRequest @p requestValue
+        result <- sendRequest @p endpoint requestValue
         case result of
             Left err -> return $ Left $ "Failed to parse response: " ++ err
             Right providerResponse ->
@@ -127,10 +124,7 @@ interpretLLMWithState composableProvider defaultConfigs = interpret $ \case
 -- | Non-streaming LLM interpreter.
 interpretLLM :: forall p model s r a.
                 ( ModelName model
-                , HasCodec (ProviderRequest model)
-                , HasCodec (ProviderResponse model)
-                , Monoid (ProviderRequest model)
-                , StreamingProtocol (ProviderResponse model)
+                , Provider model
                 , Default s
                 , Member (RestAPI p) r
                 )
@@ -165,8 +159,7 @@ data LLMStreamState model s = LLMStreamState
 -- Fetches HTTP chunks, parses SSE, extracts events, accumulates responses.
 interpretLLMStream :: forall p model s r a.
                       ( ModelName model
-                      , HasCodec (ProviderRequest model)
-                      , Monoid (ProviderRequest model)
+                      , Provider model
                       , EnableStreaming (ProviderResponse model)
                       , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
                       , HasStreaming model
@@ -201,7 +194,7 @@ interpretLLMStream api composableProvider model defaultConfigs action =
             requestValue = encode $ toJSONViaCodec streamingRequest
             httpReq = HTTPRequest
                 { method = "POST"
-                , uri = apiroot api <> "/" <> T.unpack (endpointPath @(ProviderResponse model))
+                , uri = apiroot api <> "/" <> T.unpack (endpointPath @(ProviderRequest model))
                 , headers = ("Content-Type", "application/json")
                           : ("User-Agent", useragent api)
                           : authheaders api
@@ -419,10 +412,7 @@ instance RestEndpoint LlamaCppAuth where
 -- | Non-streaming convenience interpreter.
 interpretLLMWith :: forall p model s r a.
                     ( ModelName model
-                    , HasCodec (ProviderRequest model)
-                    , HasCodec (ProviderResponse model)
-                    , Monoid (ProviderRequest model)
-                    , StreamingProtocol (ProviderResponse model)
+                    , Provider model
                     , RestEndpoint p
                     , Default s
                     , Members '[HTTP, Fail] r
@@ -442,8 +432,7 @@ interpretLLMWith api composableProvider model defaultConfigs action =
 -- | Streaming convenience interpreter.
 interpretLLMStreamingWith :: forall p model s r a.
                              ( ModelName model
-                             , HasCodec (ProviderRequest model)
-                             , Monoid (ProviderRequest model)
+                             , Provider model
                              , EnableStreaming (ProviderResponse model)
                              , ProtocolRequest (ProviderResponse model) ~ ProviderRequest model
                              , HasStreaming model
