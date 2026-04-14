@@ -48,6 +48,7 @@ module Runix.Tracing.LangFuse
   ) where
 
 import Polysemy
+import Polysemy.Fail (Fail, runFail)
 import Polysemy.State (State, get, modify, evalState)
 import qualified Data.Map.Strict as Map
 import Data.Aeson (Value, ToJSON(..), object, (.=), eitherDecode, decode)
@@ -677,7 +678,7 @@ withLangFuse _langfuse action = do
                       | otherwise -> send $ HttpRequest req
 
 -- | Export a span to LangFuse
-exportSpan :: Members '[RestAPI LangFuse, Logging] r
+exportSpan :: Members '[RestAPI LangFuse, Logging, Fail] r
            => TraceId  -- ^ Session ID
            -> SpanId
            -> Span
@@ -707,7 +708,7 @@ traceRequest session req = do
   let sessionId = sessionTraceId session
       span = buildSpanWithSession sessionId traceId spanId req startTime endTime result
 
-  exportSpan sessionId spanId span
+  _ <- runFail (exportSpan sessionId spanId span)
   pure result
 
 -- ============================================================================
@@ -766,8 +767,7 @@ withLangFuseStreaming _langfuse action = do
               -- Debug: log body size
               info $ fromString $ "LangFuse: Streaming response body size: " <> show (BSL.length (streamBody result)) <> " bytes"
 
-              -- Export using the common function
-              exportSpan sessionId spanId span
+              _ <- runFail (exportSpan sessionId spanId span)
 
               -- Clean up the map
               Polysemy.State.modify @StreamRequestMap $ Map.delete sid

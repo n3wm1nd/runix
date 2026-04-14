@@ -99,31 +99,31 @@ httpRequestStreaming = startStream
 -- | Basic HTTP interpreter (non-streaming)
 httpIO :: HasCallStack => (Request -> Request) -> Member (Embed IO) r => Sem (HTTP : r) a -> Sem r a
 httpIO requestTransform = interpret $ \case
-    HttpRequest request -> runFail $ do
+    HttpRequest request -> do
         parsed <- embed $ CMC.try (parseRequest request.uri)
-        req <- case parsed of
-            Right r -> return r
-            Left (e :: CMC.SomeException) -> fail $
-                "error parsing uri: " <> request.uri <> "\n" <> show e
-        let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
-        let hr :: Request =
-                setRequestMethod (fromString request.method) .
-                setRequestHeaders hdrs .
-                requestTransform .
-                case request.body of
-                    Just b -> setRequestBody (RequestBodyLBS b)
-                    Nothing -> id
-                $ req
-        respResult <- embed $ CMC.try (httpLBS hr)
-        resp <- case respResult of
-            Right r -> return r
-            Left (e :: CMC.SomeException) -> fail $
-                "HTTP request failed: " <> show e
-        return $ HTTPResponse
-            { code = getResponseStatusCode resp
-            , headers = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b)) $ getResponseHeaders resp
-            , body = getResponseBody resp
-            }
+        case parsed of
+            Left (e :: CMC.SomeException) ->
+                return $ Left $ "error parsing uri: " <> request.uri <> "\n" <> show e
+            Right req -> do
+                let hdrs = map (\(hn, hv) -> (fromString hn, fromString hv)) request.headers
+                let hr :: Request =
+                        setRequestMethod (fromString request.method) .
+                        setRequestHeaders hdrs .
+                        requestTransform .
+                        case request.body of
+                            Just b -> setRequestBody (RequestBodyLBS b)
+                            Nothing -> id
+                        $ req
+                respResult <- embed $ CMC.try (httpLBS hr)
+                case respResult of
+                    Left (e :: CMC.SomeException) ->
+                        return $ Left $ "HTTP request failed: " <> show e
+                    Right resp ->
+                        return $ Right $ HTTPResponse
+                            { code = getResponseStatusCode resp
+                            , headers = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b)) $ getResponseHeaders resp
+                            , body = getResponseBody resp
+                            }
 
 
 -- | Stream state: the queue plus status/headers captured at stream start

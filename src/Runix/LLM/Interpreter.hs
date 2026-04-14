@@ -67,6 +67,7 @@ import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
 import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming, HTTPStreamResult(..))
 import qualified Runix.Streaming as Streaming
 import Runix.Streaming (interpretStreamingStateful)
+import qualified Runix.RestAPI as RestAPI
 import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
 import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
@@ -85,8 +86,8 @@ sendRequest :: forall p response r.
                )
             => Endpoint -> Value -> Sem r (Either String response)
 sendRequest endpoint requestValue = do
-    responseValue <- post endpoint requestValue
-    return $ parseEither parseJSONViaCodec responseValue
+    result <- RestAPI.restRequest "POST" endpoint (Just requestValue)
+    return $ result >>= parseEither parseJSONViaCodec
 
 -- ============================================================================
 -- LLM Interpreter (non-streaming)
