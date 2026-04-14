@@ -114,7 +114,11 @@ httpIO requestTransform = interpret $ \case
                     Just b -> setRequestBody (RequestBodyLBS b)
                     Nothing -> id
                 $ req
-        resp <- httpLBS hr
+        respResult <- embed $ CMC.try (httpLBS hr)
+        resp <- case respResult of
+            Right r -> return r
+            Left (e :: CMC.SomeException) -> fail $
+                "HTTP request failed: " <> show e
         return $ HTTPResponse
             { code = getResponseStatusCode resp
             , headers = map (\(hn, b) -> (BS8.unpack (original hn), BS8.unpack b)) $ getResponseHeaders resp
