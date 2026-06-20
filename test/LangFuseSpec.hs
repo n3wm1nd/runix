@@ -123,7 +123,7 @@ mockRestAPI = interpret $ \case
     -- Return a mock success response
     -- We just parse a generic success object, which should work for Value
     case Aeson.fromJSON (object ["success" .= True]) of
-      Aeson.Success x -> return x
+      Aeson.Success x -> return (Right x)
       Aeson.Error err -> error $ "Mock parse error: " <> err
 
 -- | Mock HTTP interpreter that returns fixed responses

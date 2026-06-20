@@ -68,7 +68,7 @@ import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming, HTTPStreamResult(..))
 import qualified Runix.Streaming as Streaming
 import Runix.Streaming (interpretStreamingStateful)
 import qualified Runix.RestAPI as RestAPI
-import Runix.RestAPI (RestEndpoint(..), Endpoint(..), post, restapiHTTP, RestAPI)
+import Runix.RestAPI (RestEndpoint(..), Endpoint(..), restapiHTTP, RestAPI)
 import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
@@ -84,10 +84,12 @@ sendRequest :: forall p response r.
                ( HasCodec response
                , Member (RestAPI p) r
                )
-            => Endpoint -> Value -> Sem r (Either String response)
+            => Endpoint -> Value -> Sem r (Either RestAPI.RestError response)
 sendRequest endpoint requestValue = do
     result <- RestAPI.restRequest "POST" endpoint (Just requestValue)
-    return $ result >>= parseEither parseJSONViaCodec
+    return $ result >>= \body -> case parseEither parseJSONViaCodec body of
+        Left err -> Left $ RestAPI.ParseError err (encode body)
+        Right v  -> Right v
 
 -- ============================================================================
 -- LLM Interpreter (non-streaming)
@@ -114,7 +116,7 @@ interpretLLMWithState composableProvider defaultConfigs = interpret $ \case
 
         result <- sendRequest @p endpoint requestValue
         case result of
-            Left err -> return $ Left $ "Failed to parse response: " ++ err
+            Left err -> return $ Left $ RestAPI.restErrorMessage err
             Right providerResponse ->
                 case fromProviderResponse composableProvider m mergedConfigs stackState' providerResponse of
                     Left err -> return $ Left $ "LLM error: " ++ show err
