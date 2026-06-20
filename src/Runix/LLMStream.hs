@@ -28,6 +28,7 @@ module Runix.LLMStream
 
 import Data.Text (Text)
 import Runix.Streaming (Streaming, StreamResult)
+import Runix.RestAPI (RestError)
 
 -- Re-export universal-llm types
 import UniversalLLM (Message(..), ModelConfig(..))
@@ -50,9 +51,9 @@ data StreamEvent
 
 -- | LLM streaming using the generic Streaming abstraction
 -- Streams: StreamEvent
--- Returns: Either String [Message model] (accumulated messages)
+-- Returns: Either RestError [Message model] (accumulated messages)
 -- Config: ([ModelConfig model], [Message model])
-type LLMStreaming model = Streaming StreamEvent (Either String [Message model]) ([ModelConfig model], [Message model])
+type LLMStreaming model = Streaming StreamEvent (Either RestError [Message model]) ([ModelConfig model], [Message model])
 
 -- | Public result type for LLM streaming
 type LLMStreamResult model = StreamResult StreamEvent

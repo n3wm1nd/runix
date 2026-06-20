@@ -102,26 +102,28 @@ data StreamsState streamState = StreamsState
 -- - Allocating new StreamIds
 -- - Looking up and managing stream state
 --
--- You provide three functions:
+-- You provide:
+-- - formatErr: convert start error to String (for the StartStream Either String result)
 -- - onStart: config -> creates initial stream state (in any effects)
 -- - onFetch: streamState -> fetches next item and updates state
 -- - onClose: streamState -> closes stream and returns final result
 interpretStreamingStateful
-    :: forall item result config streamState r a.
+    :: forall item result startErr config streamState r a.
        Member Fail r
-    => (config -> Sem r (Either String streamState))  -- ^ Initialize stream state
+    => (startErr -> String)  -- ^ Convert start error to string for the effect result
+    -> (config -> Sem r (Either startErr streamState))  -- ^ Initialize stream state
     -> (streamState -> Sem r (Maybe item, streamState))  -- ^ Fetch item and update state
     -> (streamState -> Sem r result)  -- ^ Close stream and get result
     -> Sem (Streaming item result config : r) a
     -> Sem r a
-interpretStreamingStateful onStart onFetch onClose action =
+interpretStreamingStateful formatErr onStart onFetch onClose action =
     evalState (StreamsState 0 Map.empty) $
     interpret (\case
         StartStream config -> do
             -- Initialize stream state using provided function
             result <- raise $ onStart config
             case result of
-                Left err -> return $ Left err
+                Left err -> return $ Left (formatErr err)
                 Right initialState -> do
                     -- Allocate new StreamId
                     streamsState <- get @(StreamsState streamState)

@@ -27,7 +27,7 @@ import Runix.Logging (Logging(..), Level(..))
 mockHTTPStreaming :: Members '[Embed IO, Fail] r
                   => Sem (HTTPStreaming : r) a
                   -> Sem r a
-mockHTTPStreaming = interpretStreamingStateful onStart onFetch onClose
+mockHTTPStreaming = interpretStreamingStateful id onStart onFetch onClose
   where
     onStart :: HTTPRequest -> Sem r (Either String [BS.ByteString])
     onStart _req = return $ Right ["chunk1", "chunk2", "chunk3"]

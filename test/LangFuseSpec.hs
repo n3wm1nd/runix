@@ -37,7 +37,7 @@ import UniversalLLM.Models.Minimax.M (MinimaxM25(..))
 import Runix.LLM (LLM, queryLLM)
 import Runix.LLM.Interpreter (interpretLLMWith, LlamaCppAuth(..))
 import System.Environment (lookupEnv)
-import Runix.Time (Time(..), timeIO, getCurrentTime)
+import Runix.Time (Time(..), Sleep, timeIO, sleepNoop, getCurrentTime)
 
 -- ============================================================================
 -- Test Data
@@ -178,7 +178,7 @@ runTest response action =
 -- | Run a real LLM test with LangFuse tracing
 runRealLLMTest :: LangFuse
                -> LlamaCppAuth
-               -> Sem '[LLM (Model MinimaxM25 LlamaCpp), StreamChunk BS.ByteString, Cancellation, RestAPI LangFuse, HTTP, Time, Logging, Fail, Embed IO] a
+               -> Sem '[LLM (Model MinimaxM25 LlamaCpp), StreamChunk BS.ByteString, Cancellation, RestAPI LangFuse, HTTP, Sleep, Time, Logging, Fail, Embed IO] a
                -> IO (Either String a)
 runRealLLMTest langfuse auth action = do
   logsRef <- newIORef []
@@ -186,6 +186,7 @@ runRealLLMTest langfuse auth action = do
     $ runFail
     $ loggingToIORef logsRef
     $ timeIO
+    $ sleepNoop
     $ httpIO_
     $ restapiHTTP langfuse
     $ withLangFuse langfuse

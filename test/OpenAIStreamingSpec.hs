@@ -85,7 +85,7 @@ glm45TextOnlyComposableProvider = baseProvider
 mockHTTP :: forall r a. BSL.ByteString -> Members '[Logging, Embed IO, Fail] r => Sem (HTTP ': HTTPStreaming ': r) a -> Sem r a
 mockHTTP sseBody =
     -- First interpret HTTPStreaming (which is Streaming BS.ByteString HTTPStreamResult HTTPRequest)
-    interpretStreamingStateful onStart onFetch onClose
+    interpretStreamingStateful id onStart onFetch onClose
     -- Then interpret HTTP (non-streaming)
     . interpret @HTTP (\case
         HTTPEff.HttpRequest _ -> do

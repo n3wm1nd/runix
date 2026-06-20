@@ -144,7 +144,7 @@ data HTTPStreamState = HTTPStreamState
 -- For non-interactive contexts use 'httpIOStreaming' which bundles cancelNoop.
 httpIOStreamingWithCancellation :: forall r a. (HasCallStack, Members '[Embed IO, Fail, Cancellation] r) => (Request -> Request) -> Sem (HTTPStreaming : r) a -> Sem r a
 httpIOStreamingWithCancellation requestTransform =
-    interpretStreamingStateful onStart onFetch onClose
+    interpretStreamingStateful id onStart onFetch onClose
   where
     -- Initialize: Create TQueue, fork HTTP request thread, wait for header
     onStart request = do

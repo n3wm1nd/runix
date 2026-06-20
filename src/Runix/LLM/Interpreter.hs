@@ -68,7 +68,8 @@ import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming, HTTPStreamResult(..))
 import qualified Runix.Streaming as Streaming
 import Runix.Streaming (interpretStreamingStateful)
 import qualified Runix.RestAPI as RestAPI
-import Runix.RestAPI (RestEndpoint(..), Endpoint(..), restapiHTTP, RestAPI)
+import Runix.RestAPI (RestEndpoint(..), Endpoint(..), restapiHTTP, RestAPI, llmRetry, llmStreamRetry)
+import Runix.Time (Time, Sleep)
 import Runix.Cancellation (Cancellation, onCancellation)
 import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
@@ -177,7 +178,7 @@ interpretLLMStream :: forall p model s r a.
                    -> Sem r a
 interpretLLMStream api composableProvider model defaultConfigs action =
     evalState (model, def @s) $
-    interpretStreamingStateful onStart onFetch onClose $
+    interpretStreamingStateful RestAPI.restErrorMessage onStart onFetch onClose $
     raiseUnder @(State (model, s)) action
   where
     contentToEvent :: StreamingContent -> StreamEvent
@@ -208,7 +209,7 @@ interpretLLMStream api composableProvider model defaultConfigs action =
         -- Start HTTP stream
         result <- raise $ send (Streaming.StartStream httpReq)
         case result of
-            Left err -> return $ Left err
+            Left err -> return $ Left $ RestAPI.ConnectionError err
             Right httpStreamId -> do
                 let initialStreamState = LLMStreamState
                         { streamEventBuffer = []
@@ -270,14 +271,16 @@ interpretLLMStream api composableProvider model defaultConfigs action =
         -- Close the HTTP stream and get the result
         httpResult <- raise $ send (Streaming.CloseStream (streamHTTPStreamId streamState))
         if streamStatusCode httpResult < 200 || streamStatusCode httpResult >= 300
-        then return $ Left $ "HTTP error " ++ show (streamStatusCode httpResult)
-                          ++ ": " ++ BSL8.unpack (streamBody httpResult)
+        then return $ Left $ RestAPI.HttpError
+                          (streamStatusCode httpResult)
+                          (streamHeaders httpResult)
+                          (streamBody httpResult)
         else
             -- Use composableProvider to convert accumulated response to messages
             case fromProviderResponse composableProvider m (streamConfigs streamState)
                     (streamStackState streamState)
                     (streamAccumulatedResponse streamState) of
-                Left err -> return $ Left $ "Failed to parse accumulated response: " ++ show err
+                Left err -> return $ Left $ RestAPI.ParseError (show err) (streamBody httpResult)
                 Right (_stackState', messages) -> return $ Right messages
 
 -- | Start an LLM streaming request
@@ -293,7 +296,7 @@ startLLMStream :: forall model r a.
                => [ModelConfig model]
                -> [Message model]
                -> Sem (LLMStreamResult model : r) a
-               -> Sem r (a, Either String [Message model])
+               -> Sem r (a, Either RestAPI.RestError [Message model])
 startLLMStream configs messages = Streaming.startStream (configs, messages)
 
 -- | Convenience function that streams an LLM request and returns the accumulated messages
@@ -314,8 +317,9 @@ queryStreamingLLM configs messages = do
                 Just _ -> consumeEvents
         consumeEvents
     case messagesResult of
-        Left err -> fail err
+        Left err -> fail $ RestAPI.restErrorMessage err
         Right msgs -> return msgs
+
 
 -- ============================================================================
 -- Interpret LLM in terms of LLMStreaming
@@ -325,13 +329,25 @@ queryStreamingLLM configs messages = do
 --
 -- This allows non-streaming LLM code to run on top of streaming infrastructure.
 -- It consumes all streaming events internally and returns the final accumulated messages.
+-- Retries the full stream lifecycle on transient errors (429, connection reset).
 interpretLLMViaStreaming :: forall model r a.
-                            Members '[LLMStreaming model, Fail] r
+                            Members '[LLMStreaming model, Fail, Time, Sleep] r
                          => Sem (LLM model : r) a
                          -> Sem r a
 interpretLLMViaStreaming = interpret $ \case
     QueryLLM configs messages -> do
-        Right <$> queryStreamingLLM configs messages
+        result <- llmStreamRetry $ do
+            ((), r) <- startLLMStream configs messages $ do
+                let consumeEvents = do
+                      mEvent <- Streaming.fetchNext @StreamEvent
+                      case mEvent of
+                        Nothing -> return ()
+                        Just _  -> consumeEvents
+                consumeEvents
+            return r
+        case result of
+            Left err  -> return $ Left $ RestAPI.restErrorMessage err
+            Right msgs -> return $ Right msgs
 
 -- ============================================================================
 -- Generic Model Wrapper
@@ -417,7 +433,7 @@ interpretLLMWith :: forall p model s r a.
                     , Provider model
                     , RestEndpoint p
                     , Default s
-                    , Members '[HTTP, Fail] r
+                    , Members '[HTTP, Fail, Time, Sleep] r
                     )
                  => p
                  -> ComposableProvider model s
@@ -427,6 +443,7 @@ interpretLLMWith :: forall p model s r a.
                  -> Sem r a
 interpretLLMWith api composableProvider model defaultConfigs action =
     restapiHTTP api $
+    llmRetry $
     interpretLLM @p composableProvider model defaultConfigs $
     raiseUnder @(RestAPI p)
     action
