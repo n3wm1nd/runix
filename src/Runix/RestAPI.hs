@@ -239,32 +239,3 @@ exponentialDelay attempt = min 60 (fromIntegral (2 ^ attempt :: Int))
 llmRetry :: Members '[RestAPI p, Time, Sleep] r => Sem r a -> Sem r a
 llmRetry = withRestAPIResilience 10 (retryOnErrorN 10 llmRetryBackoff)
 
--- | Generic resilience wrapper for any action returning 'Either RestError a'.
---
--- Identical policy model to 'withRestAPIResilience' but works on a plain action
--- rather than an intercepted effect. Use this for streaming paths where the
--- entire stream lifecycle (start → fetch → close) is the unit of retry.
-withResilience
-    :: forall acc r a.
-       Members '[Time, Sleep] r
-    => acc
-    -> (forall s. acc -> RetryEnv -> Either RestError s -> (RetryDecision, acc))
-    -> Sem r (Either RestError a)
-    -> Sem r (Either RestError a)
-withResilience initialAcc policy action = attempt initialAcc
-  where
-    attempt acc = do
-        started <- getCurrentTime
-        result  <- action
-        ended   <- getCurrentTime
-        let env = RetryEnv { requestStarted = started, requestEnded = ended }
-            (decision, acc') = policy acc env result
-        case decision of
-            PassThrough      -> return result
-            RetryImmediately -> attempt acc'
-            RetryAfter dt    -> sleepFor dt >> attempt acc'
-
--- | Default resilience wrapper for LLM streaming requests.
--- Same policy as 'llmRetry': 10 retries, exponential backoff, Retry-After header honoured.
-llmStreamRetry :: Members '[Time, Sleep] r => Sem r (Either RestError a) -> Sem r (Either RestError a)
-llmStreamRetry = withResilience 10 (retryOnErrorN 10 llmRetryBackoff)

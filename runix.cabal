@@ -77,6 +77,8 @@ library
         Runix.Streaming.SSE.Conduit,
         Runix.HTTP,
         Runix.RestAPI,
+        Runix.RestAPI.Streaming,
+        Runix.LLM.Streaming,
         Runix.Tracing,
         Runix.Tracing.LangFuse,
         Runix.Tracing.FileLog,
@@ -127,7 +129,6 @@ test-suite runix-test
 
     -- Modules included in this executable, other than Main.
     other-modules:    Paths_runix
-                    , OpenAIStreamingSpec
                     , PathResolutionSpec
                     , ChrootTranslationSpec
                     , FileSystemSecuritySpec
@@ -138,6 +139,7 @@ test-suite runix-test
                     , HTTPStreamingInterceptorSpec
                     , LangFuseSpec
                     , LLMProviderSpec
+                    , RestAPIStreamingSpec
     autogen-modules:  Paths_runix
 
     -- LANGUAGE extensions used by modules in this package.

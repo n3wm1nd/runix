@@ -14,21 +14,10 @@
 {-# LANGUAGE TypeFamilies #-}
 
 module Runix.LLM.Interpreter
-  ( -- * LLM interpreters
-    -- ** Non-streaming (requires RestAPI already in effect row)
+  ( -- * LLM interpreter
     interpretLLM
-    -- ** LLMStream interpreter (new streaming architecture)
-  , interpretLLMStream
-  , startLLMStream
-  , queryStreamingLLM
-    -- ** Interpret LLM in terms of LLMStreaming
-  , interpretLLMViaStreaming
-    -- ** Convenience (bundles restapiHTTP, for tests etc.)
+    -- * Convenience (bundles restapiHTTP and llmRetry)
   , interpretLLMWith
-  , interpretLLMStreamingWith
-    -- * Protocol typeclasses (re-exported from UniversalLLM)
-    -- StreamingProtocol, EnableStreaming, StreamingContent
-    -- are exported via 'module UniversalLLM' below
     -- * Cancellation wrapper
   , withLLMCancellation
     -- * Generic model wrappers
@@ -63,17 +52,11 @@ import UniversalLLM.Providers.Anthropic (Anthropic(..), oauthHeaders)
 import UniversalLLM.Providers.OpenAI (OpenAI(..), OpenRouter(..), LlamaCpp(..))
 
 import Runix.LLM (LLM(..))
-import Runix.LLMStream (LLMStreaming, LLMStreamResult, StreamEvent(..))
-import Runix.HTTP (HTTP, HTTPRequest(..), HTTPStreaming, HTTPStreamResult(..))
-import qualified Runix.Streaming as Streaming
-import Runix.Streaming (interpretStreamingStateful)
+import Runix.HTTP (HTTP)
 import qualified Runix.RestAPI as RestAPI
-import Runix.RestAPI (RestEndpoint(..), Endpoint(..), restapiHTTP, RestAPI, llmRetry, llmStreamRetry)
+import Runix.RestAPI (RestEndpoint(..), Endpoint(..), restapiHTTP, RestAPI, llmRetry)
 import Runix.Time (Time, Sleep)
 import Runix.Cancellation (Cancellation, onCancellation)
-import Runix.Streaming.SSE (SSEEvent(..), SSEParseResult(..), parseSSEChunks)
-import qualified Data.ByteString.Lazy.Char8 as BSL8
-import qualified Data.ByteString as BS
 
 
 -- ============================================================================
@@ -93,18 +76,17 @@ sendRequest endpoint requestValue = do
         Right v  -> Right v
 
 -- ============================================================================
--- LLM Interpreter (non-streaming)
+-- LLM Interpreter
 -- ============================================================================
 
 -- | Internal interpreter with explicit state in effect row
--- | Internal interpreter with explicit state - first-order, no streaming
 interpretLLMWithState :: forall p model s r a.
                          ( ModelName model
                          , Provider model
                          , Members '[RestAPI p, State (model, s)] r
                          )
                       => ComposableProvider model s
-                      -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
+                      -> [ModelConfig model]
                       -> Sem (LLM model : r) a
                       -> Sem r a
 interpretLLMWithState composableProvider defaultConfigs = interpret $ \case
@@ -125,7 +107,11 @@ interpretLLMWithState composableProvider defaultConfigs = interpret $ \case
                         put (m, stackState'')
                         return $ Right resultMessages
 
--- | Non-streaming LLM interpreter.
+-- | LLM interpreter. Requires 'RestAPI p' in the effect row.
+--
+-- To add streaming support, insert 'llmStreamingRestAPI' between this and
+-- 'restapiHTTP' in the interpreter stack. To add retry, wrap with 'llmRetry'.
+-- For the common case, use 'interpretLLMWith' which bundles both.
 interpretLLM :: forall p model s r a.
                 ( ModelName model
                 , Provider model
@@ -134,7 +120,7 @@ interpretLLM :: forall p model s r a.
                 )
              => ComposableProvider model s
              -> model
-             -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
+             -> [ModelConfig model]
              -> Sem (LLM model : r) a
              -> Sem r a
 interpretLLM composableProvider model defaultConfigs action =
@@ -143,224 +129,45 @@ interpretLLM composableProvider model defaultConfigs action =
     raiseUnder action
 
 -- ============================================================================
--- LLMStream Interpreter (new streaming architecture)
+-- Convenience Interpreter
 -- ============================================================================
 
--- | Internal state for an active LLM stream
-data LLMStreamState model s = LLMStreamState
-    { streamHTTPStreamId :: Streaming.StreamId  -- HTTP stream ID for this LLM stream
-    , streamEventBuffer :: [StreamEvent]  -- Buffered events from current chunk
-    , streamSSERemainder :: BS.ByteString  -- Incomplete SSE data from previous chunk
-    , streamAccumulatedResponse :: ProviderResponse model  -- Accumulated response
-    , streamStackState :: s
-    , streamConfigs :: [ModelConfig model]
-    , streamModel :: model
-    }
-
--- | LLMStream interpreter - provides LLM streaming via HTTPStreaming
+-- | Convenience interpreter: bundles 'restapiHTTP' and 'llmRetry'.
 --
--- Uses interpretStreamingStateful to manage stream state.
--- Fetches HTTP chunks, parses SSE, extracts events, accumulates responses.
-interpretLLMStream :: forall p model s r a.
-                      ( ModelName model
-                      , Provider model
-                      , EnableStreaming model
-                      , HasStreaming model
-                      , RestEndpoint p
-                      , Default s
-                      , Members '[HTTPStreaming, Fail] r
-                      )
-                   => p
-                   -> ComposableProvider model s
-                   -> model
-                   -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
-                   -> Sem (LLMStreaming model : r) a
-                   -> Sem r a
-interpretLLMStream api composableProvider model defaultConfigs action =
-    evalState (model, def @s) $
-    interpretStreamingStateful RestAPI.restErrorMessage onStart onFetch onClose $
-    raiseUnder @(State (model, s)) action
-  where
-    contentToEvent :: StreamingContent -> StreamEvent
-    contentToEvent (StreamingText txt) = StreamText txt
-    contentToEvent (StreamingReasoning txt) = StreamThinking txt
-
-    -- Initialize: Build HTTP request and start HTTP stream
-    onStart (queryConfigs, messages) = do
-        (m, stackState) <- get @(model, s)
-
-        let configs = queryConfigs ++ defaultConfigs
-        -- Build the provider request
-        let (stackState', request) = toProviderRequest composableProvider m configs stackState messages
-            -- Enable streaming on the request
-            streamingRequest = enableStreamingForProtocol @model request
-            requestValue = encode $ toJSONViaCodec streamingRequest
-            httpReq = HTTPRequest
-                { method = "POST"
-                , uri = apiroot api <> "/" <> T.unpack (endpointPath @(ProviderRequest model))
-                , headers = ("Content-Type", "application/json")
-                          : ("User-Agent", useragent api)
-                          : authheaders api
-                , body = Just requestValue
-                }
-
-        put (m, stackState')
-
-        -- Start HTTP stream
-        result <- raise $ send (Streaming.StartStream httpReq)
-        case result of
-            Left err -> return $ Left $ RestAPI.ConnectionError err
-            Right httpStreamId -> do
-                let initialStreamState = LLMStreamState
-                        { streamEventBuffer = []
-                        , streamSSERemainder = BS.empty
-                        , streamAccumulatedResponse = emptyStreamingResponse @(ProviderResponse model)
-                        , streamStackState = stackState'
-                        , streamHTTPStreamId = httpStreamId
-                        , streamConfigs = configs
-                        , streamModel = m
-                        }
-                return $ Right initialStreamState
-
-    -- Fetch: Get next event, parsing HTTP chunks as needed
-    onFetch streamState = do
-        -- Check buffer first
-        case streamEventBuffer streamState of
-            (event:rest) -> do
-                return (Just event, streamState { streamEventBuffer = rest })
-            [] -> do
-                -- Fetch next HTTP chunk using the tracked HTTP StreamId
-                mChunk <- send (Streaming.FetchItem (streamHTTPStreamId streamState))
-                case mChunk of
-                    Nothing -> return (Nothing, streamState)  -- HTTP stream ended
-                    Just chunk -> do
-                        -- Combine with SSE remainder from previous chunk
-                        let input = streamSSERemainder streamState <> chunk
-                            SSEParseResult sseEvents remainder = parseSSEChunks input
-
-                        -- Parse each SSE event's data as a delta (single pass)
-                        let deltas = [d | event <- sseEvents
-                                        , Just d <- [parseDelta @(ProviderResponse model) (sseEventData event)]]
-
-                        -- Accumulate and extract display content in one pass over deltas
-                        let accumulated' = foldl (applyDelta @(ProviderResponse model))
-                                                 (streamAccumulatedResponse streamState)
-                                                 deltas
-                            contents = concatMap (extractStreamingContent @(ProviderResponse model)) deltas
-                            events = map contentToEvent contents
-
-                        case events of
-                            [] -> do
-                                -- Update accumulated response and remainder but no events to emit
-                                onFetch (streamState
-                                    { streamAccumulatedResponse = accumulated'
-                                    , streamSSERemainder = remainder
-                                    })
-                            (event:rest) -> do
-                                -- Update state with new accumulation, buffered events, and remainder
-                                let streamState' = streamState
-                                        { streamEventBuffer = rest
-                                        , streamAccumulatedResponse = accumulated'
-                                        , streamSSERemainder = remainder
-                                        }
-                                return (Just event, streamState')
-
-    -- Close: Check HTTP status, then convert accumulated response to messages
-    onClose streamState = do
-        (m, _) <- get @(model, s)
-        -- Close the HTTP stream and get the result
-        httpResult <- raise $ send (Streaming.CloseStream (streamHTTPStreamId streamState))
-        if streamStatusCode httpResult < 200 || streamStatusCode httpResult >= 300
-        then return $ Left $ RestAPI.HttpError
-                          (streamStatusCode httpResult)
-                          (streamHeaders httpResult)
-                          (streamBody httpResult)
-        else
-            -- Use composableProvider to convert accumulated response to messages
-            case fromProviderResponse composableProvider m (streamConfigs streamState)
-                    (streamStackState streamState)
-                    (streamAccumulatedResponse streamState) of
-                Left err -> return $ Left $ RestAPI.ParseError (show err) (streamBody httpResult)
-                Right (_stackState', messages) -> return $ Right messages
-
--- | Start an LLM streaming request
+-- For streaming support, use 'llmStreamingRestAPI' from "Runix.LLM.Streaming"
+-- between this and the HTTP interpreter:
 --
--- Similar to httpRequestStreaming, this function:
--- - Takes model configs and messages
--- - Takes an action that uses LLMStreamResult effect
--- - Starts the stream and provides LLMStreamResult interpreter for the action
--- - Returns both the action result and the accumulated messages
--- - Automatically cleans up when done
-startLLMStream :: forall model r a.
-                  Members '[LLMStreaming model, Fail] r
-               => [ModelConfig model]
-               -> [Message model]
-               -> Sem (LLMStreamResult model : r) a
-               -> Sem r (a, Either RestAPI.RestError [Message model])
-startLLMStream configs messages = Streaming.startStream (configs, messages)
-
--- | Convenience function that streams an LLM request and returns the accumulated messages
---
--- This consumes all streaming events and returns just the final accumulated messages.
--- Use this when you want to use streaming transport (SSE) but don't need real-time events.
-queryStreamingLLM :: forall model r.
-                     Members '[LLMStreaming model, Fail] r
-                  => [ModelConfig model]
-                  -> [Message model]
-                  -> Sem r [Message model]
-queryStreamingLLM configs messages = do
-    ((), messagesResult) <- startLLMStream configs messages $ do
-        let consumeEvents = do
-              mEvent <- Streaming.fetchNext @StreamEvent
-              case mEvent of
-                Nothing -> return ()
-                Just _ -> consumeEvents
-        consumeEvents
-    case messagesResult of
-        Left err -> fail $ RestAPI.restErrorMessage err
-        Right msgs -> return msgs
-
-
--- ============================================================================
--- Interpret LLM in terms of LLMStreaming
--- ============================================================================
-
--- | Interpret LLM effect using LLMStreaming infrastructure
---
--- This allows non-streaming LLM code to run on top of streaming infrastructure.
--- It consumes all streaming events internally and returns the final accumulated messages.
--- Retries the full stream lifecycle on transient errors (429, connection reset).
-interpretLLMViaStreaming :: forall model r a.
-                            Members '[LLMStreaming model, Fail, Time, Sleep] r
-                         => Sem (LLM model : r) a
-                         -> Sem r a
-interpretLLMViaStreaming = interpret $ \case
-    QueryLLM configs messages -> do
-        result <- llmStreamRetry $ do
-            ((), r) <- startLLMStream configs messages $ do
-                let consumeEvents = do
-                      mEvent <- Streaming.fetchNext @StreamEvent
-                      case mEvent of
-                        Nothing -> return ()
-                        Just _  -> consumeEvents
-                consumeEvents
-            return r
-        case result of
-            Left err  -> return $ Left $ RestAPI.restErrorMessage err
-            Right msgs -> return $ Right msgs
+-- > httpIO . httpStreamingIO . llmStreamingRestAPI @model api . interpretLLMWith api provider model configs
+interpretLLMWith :: forall p model s r a.
+                    ( ModelName model
+                    , Provider model
+                    , RestEndpoint p
+                    , Default s
+                    , Members '[HTTP, Fail, Time, Sleep] r
+                    )
+                 => p
+                 -> ComposableProvider model s
+                 -> model
+                 -> [ModelConfig model]
+                 -> Sem (LLM model : r) a
+                 -> Sem r a
+interpretLLMWith api composableProvider model defaultConfigs action =
+    restapiHTTP api $
+    llmRetry $
+    interpretLLM @p composableProvider model defaultConfigs $
+    raiseUnder @(RestAPI p)
+    action
 
 -- ============================================================================
 -- Generic Model Wrapper
 -- ============================================================================
 
--- Generic model that accepts any model name string
--- Useful for providers where you want to specify the model at runtime
+-- | Generic model that accepts any model name string at runtime.
 -- Example: GenericModel "deepseek/deepseek-chat-v3-0324:free"
 data GenericModel = GenericModel
     { modelId :: Text
     } deriving (Show, Eq)
 
--- Instances for OpenRouter (uses OpenAI protocol)
 instance ModelName (Model GenericModel OpenRouter) where
   modelName (Model m _) = modelId m
 
@@ -368,7 +175,6 @@ instance ModelName (Model GenericModel OpenRouter) where
 -- Auth Configurations
 -- ============================================================================
 
--- Anthropic API Key Authentication
 data AnthropicAPIKeyAuth = AnthropicAPIKeyAuth { anthropicApiKey :: String }
 
 instance RestEndpoint AnthropicAPIKeyAuth where
@@ -378,7 +184,6 @@ instance RestEndpoint AnthropicAPIKeyAuth where
         , ("anthropic-version", "2023-06-01")
         ]
 
--- Anthropic OAuth Authentication (for Claude Code)
 data AnthropicOAuthAuth = AnthropicOAuthAuth { anthropicOAuthToken :: String }
 
 instance RestEndpoint AnthropicOAuthAuth where
@@ -424,55 +229,11 @@ instance RestEndpoint LlamaCppAuth where
     authheaders _ = []
 
 -- ============================================================================
--- Convenience Interpreters (bundle restapiHTTP)
--- ============================================================================
-
--- | Non-streaming convenience interpreter.
-interpretLLMWith :: forall p model s r a.
-                    ( ModelName model
-                    , Provider model
-                    , RestEndpoint p
-                    , Default s
-                    , Members '[HTTP, Fail, Time, Sleep] r
-                    )
-                 => p
-                 -> ComposableProvider model s
-                 -> model
-                 -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
-                 -> Sem (LLM model : r) a
-                 -> Sem r a
-interpretLLMWith api composableProvider model defaultConfigs action =
-    restapiHTTP api $
-    llmRetry $
-    interpretLLM @p composableProvider model defaultConfigs $
-    raiseUnder @(RestAPI p)
-    action
-
--- | Streaming convenience interpreter.
-interpretLLMStreamingWith :: forall p model s r a.
-                             ( ModelName model
-                             , Provider model
-                             , EnableStreaming model
-                             , HasStreaming model
-                             , RestEndpoint p
-                             , Default s
-                             , Members '[HTTPStreaming, Fail] r
-                             )
-                          => p
-                          -> ComposableProvider model s
-                          -> model
-                          -> [ModelConfig model]  -- ^ Default configs (fallback after per-query configs)
-                          -> Sem (LLMStreaming model : r) a
-                          -> Sem r a
-interpretLLMStreamingWith api composableProvider model defaultConfigs action =
-    interpretLLMStream api composableProvider model defaultConfigs action
-
--- ============================================================================
 -- Cancellable Wrapper
 -- ============================================================================
 
--- | Wrapper that adds cancellation support to any LLM interpreter
--- Returns empty list if cancellation is active
+-- | Wrapper that adds cancellation support to any LLM interpreter.
+-- Returns empty list if cancellation is active.
 withLLMCancellation :: forall model r a.
                        Member Cancellation r
                     => Sem (LLM model : r) a
