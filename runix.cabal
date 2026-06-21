@@ -84,7 +84,6 @@ library
         Runix.Tracing.FileLog,
         Runix.Time,
         Runix.LLM,
-        Runix.LLMStream,
         Runix.LLM.Context,
         Runix.LLM.Interpreter,
         Runix.LLM.Provider,

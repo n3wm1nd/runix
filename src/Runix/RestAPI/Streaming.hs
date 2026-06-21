@@ -62,13 +62,15 @@ streamingRestAPI :: forall p event r a.
   -> (Value -> Bool)        -- ^ Is this a streaming request?
   -> ([Value] -> Value)     -- ^ Reassemble SSE payloads into a response body
   -> (Value -> [event])     -- ^ Extract events to emit from each SSE payload
+  -> Maybe event            -- ^ Event to emit when the stream starts
+  -> Maybe event            -- ^ Event to emit when the stream ends
   -> Sem r a
   -> Sem r a
-streamingRestAPI api isStreaming reassemble extract = intercept @(RestAPI p) $ \case
+streamingRestAPI api isStreaming reassemble extract onStart onEnd = intercept @(RestAPI p) $ \case
   RestRequest method endpoint (maybeBody :: Maybe reqBody) ->
     case fmap encode maybeBody >>= decode of
       Just (bodyVal :: Value) | isStreaming bodyVal ->
-        runStreamingRequest api method endpoint maybeBody reassemble extract
+        runStreamingRequest api method endpoint maybeBody reassemble extract onStart onEnd
       _ ->
         send (RestRequest method endpoint maybeBody)
 
@@ -86,14 +88,18 @@ runStreamingRequest :: forall p reqBody respBody event r.
   -> Maybe reqBody
   -> ([Value] -> Value)
   -> (Value -> [event])
+  -> Maybe event
+  -> Maybe event
   -> Sem r (Either RestError respBody)
-runStreamingRequest api method endpoint maybeBody reassemble extract = do
+runStreamingRequest api method endpoint maybeBody reassemble extract onStart onEnd = do
   let httpReq = makeHTTPRequest api method endpoint maybeBody
   streamResult <- send (Streaming.StartStream httpReq)
   case streamResult of
     Left err -> return $ Left $ ConnectionError err
     Right streamId -> do
+      mapM_ emitChunk onStart
       sseValues <- consumeAndEmit streamId extract
+      mapM_ emitChunk onEnd
       httpResult <- send (Streaming.CloseStream streamId)
       if httpResult.streamStatusCode < 200 || httpResult.streamStatusCode >= 300
         then return $ Left $ HttpError

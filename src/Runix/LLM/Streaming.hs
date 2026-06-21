@@ -10,29 +10,39 @@
 -- Bridges the generic 'streamingRestAPI' interceptor with the 'EnableStreaming'
 -- typeclass from "UniversalLLM", supplying protocol-aware detection, reassembly,
 -- and event extraction functions derived from the model type.
+--
+-- Also defines 'StreamEvent', the protocol-agnostic event type emitted during streaming.
 module Runix.LLM.Streaming
   ( llmStreamingRestAPI
-  , interpretLLMWithStreaming
+  , StreamEvent(..)
   ) where
 
 import Polysemy
-import Polysemy.Fail
+import Polysemy.Fail (Fail)
+import Data.Text (Text)
 
-import Runix.HTTP (HTTP, HTTPStreaming)
-import Runix.LLM (LLM)
-import Runix.LLMStream (StreamEvent(..))
-import Runix.RestAPI (RestAPI, RestEndpoint, restapiHTTP, llmRetry)
+import Runix.HTTP (HTTPStreaming)
+import Runix.RestAPI (RestAPI, RestEndpoint)
 import Runix.RestAPI.Streaming (streamingRestAPI)
 import Runix.StreamChunk (StreamChunk)
-import Runix.Time (Time, Sleep)
-import Runix.LLM.Interpreter (interpretLLM)
-import Data.Default (Default, def)
 
 import UniversalLLM (EnableStreaming, StreamingContent(..), isStreamingRequestJSON, reassembleToJSON)
-import UniversalLLM (StreamingProtocol, extractStreamingContent, parseDelta, ProviderResponse, ModelName, Provider, ComposableProvider, ModelConfig)
+import UniversalLLM (extractStreamingContent, parseDelta, ProviderResponse)
 import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BSL
+
+-- | Protocol-agnostic events emitted during LLM streaming.
+data StreamEvent
+  = StreamStarted                    -- ^ Stream has begun
+  | StreamText Text                  -- ^ Assistant text chunk
+  | StreamThinking Text              -- ^ Reasoning/thinking chunk
+  | StreamToolCallStarted Text Text  -- ^ Tool call started (id, name)
+  | StreamToolCallArgument Text Text -- ^ Tool call argument chunk (id, partial args)
+  | StreamToolCallComplete Text      -- ^ Tool call finished (id)
+  | StreamError Text                 -- ^ Error occurred
+  | StreamDone                       -- ^ Stream completed normally
+  deriving (Show, Eq)
 
 -- | Convert a 'StreamingContent' to a 'StreamEvent'.
 contentToEvent :: StreamingContent -> StreamEvent
@@ -73,26 +83,6 @@ llmStreamingRestAPI api =
     (isStreamingRequestJSON @model)
     (reassembleToJSON @model)
     (extractEvents @model)
+    (Just StreamStarted)
+    (Just StreamDone)
 
--- | Convenience interpreter: bundles 'restapiHTTP', 'llmStreamingRestAPI', and 'llmRetry'.
---
--- Equivalent to 'interpretLLMWith' but with streaming support baked in.
--- 'StreamChunk StreamEvent' must be provided by the caller.
-interpretLLMWithStreaming :: forall p model s r a.
-  ( ModelName model, Provider model, EnableStreaming model
-  , RestEndpoint p, Default s
-  , Members '[HTTP, HTTPStreaming, StreamChunk StreamEvent, Fail, Time, Sleep] r
-  )
-  => p
-  -> ComposableProvider model s
-  -> model
-  -> [ModelConfig model]
-  -> Sem (LLM model : r) a
-  -> Sem r a
-interpretLLMWithStreaming api provider model configs action =
-    restapiHTTP api $
-    llmStreamingRestAPI @model api $
-    llmRetry $
-    interpretLLM @p provider model configs $
-    raiseUnder @(RestAPI p)
-    action

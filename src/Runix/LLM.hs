@@ -59,7 +59,7 @@ import UniversalLLM.Tools (LLMTool(..))
 -- This ensures anyone using LLM effects automatically gets the instances they need
 import Runix.LLM.ToolInstances ()
 
-import Runix.LLMStream (StreamEvent)
+import Runix.LLM.Streaming (StreamEvent)
 
 -- | Info metadata delivered during LLM queries (streaming chunks, usage, etc.).
 --

@@ -124,17 +124,16 @@ spec = describe "streamingRestAPI" $ do
     let body      = object [ "model" .= ("test" :: Text) ]
         fixedResp = object [ "content" .= ("from RestAPI" :: Text) ]
         result    = runTest [] fixedResp $
-          streamingRestAPI TestAuth isStreamingVal concatContent (:[]) $
+          streamingRestAPI TestAuth isStreamingVal concatContent (:[]) Nothing Nothing $
             restRequest @TestAuth "POST" (Endpoint "test") (Just body)
     in assertResult result fixedResp
 
   it "routes streaming requests through HTTPStreaming, not HTTP" $
-    -- If HTTP is reached, httpMustNotBeCalled returns Left via Fail → assertResult fails.
     let body      = object [ "stream" .= True ]
         sseChunks = toSSEChunks [ object [ "content" .= ("Hello" :: Text) ] ]
         expected  = object [ "content" .= ("Hello" :: Text) ]
         result    = runTest sseChunks (object []) $
-          streamingRestAPI TestAuth isStreamingVal concatContent (:[]) $
+          streamingRestAPI TestAuth isStreamingVal concatContent (:[]) Nothing Nothing $
             restRequest @TestAuth "POST" (Endpoint "test") (Just body)
     in assertResult result expected
 
@@ -146,6 +145,6 @@ spec = describe "streamingRestAPI" $ do
           ]
         expected  = object [ "content" .= ("Hello, world" :: Text) ]
         result    = runTest sseChunks (object []) $
-          streamingRestAPI TestAuth isStreamingVal concatContent (:[]) $
+          streamingRestAPI TestAuth isStreamingVal concatContent (:[]) Nothing Nothing $
             restRequest @TestAuth "POST" (Endpoint "test") (Just body)
     in assertResult result expected
